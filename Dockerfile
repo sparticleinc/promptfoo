@@ -30,6 +30,7 @@ RUN apk update && apk add python3 build-base --no-cache
 # Envars are read in from src/web/nextui/.env.production
 RUN echo "*** Building with env vars from .env.production"
 
+RUN mkdir -p /app/src/web/nextui/out
 RUN npm install
 
 WORKDIR /app/src/web/nextui
@@ -51,12 +52,12 @@ RUN mkdir -p /root/.promptfoo/output
 
 # Create a script to write environment variables to .env file
 RUN echo -e '#!/bin/sh\n\
-echo "Writing environment variables to .env file..."\n\
-env > .env\n\
-echo "Loaded environment variables:"\n\
-cat .env\n\
-echo "Starting server..."\n\
-node server.js' > entrypoint.sh
+  echo "Writing environment variables to .env file..."\n\
+  env > .env\n\
+  echo "Loaded environment variables:"\n\
+  cat .env\n\
+  echo "Starting server..."\n\
+  node server.js' > entrypoint.sh
 
 # Make the script executable
 RUN chmod +x entrypoint.sh
