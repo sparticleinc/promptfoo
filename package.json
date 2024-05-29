@@ -1,11 +1,11 @@
 {
-  "name": "promptfoo",
+  "name": "felo-promptfoo",
   "description": "LLM eval & testing toolkit",
   "author": "Ian Webster",
   "version": "0.60.0",
   "license": "MIT",
   "type": "commonjs",
-  "repository": "promptfoo/promptfoo",
+  "repository": "sparticleinc/promptfoo",
   "main": "dist/src/index.js",
   "exports": {
     ".": {
@@ -22,7 +22,7 @@
     "node": ">=16"
   },
   "bin": {
-    "promptfoo": "dist/src/main.js"
+    "felo-promptfoo": "dist/src/main.js"
   },
   "scripts": {
     "tsc": "tsc",
@@ -30,7 +30,7 @@
     "local:web": "cd src/web/nextui && npm run dev",
     "install:nextui": "cd src/web/nextui && npm install",
     "build:clean": "rm -rf dist",
-    "build:nextui": "cd src/web/nextui && npm run build && { [ -z \"$NEXT_PUBLIC_PROMPTFOO_BUILD_STANDALONE_SERVER\" ] && cp -r out/ ../../../dist/src/web/nextui; } || true",
+    "build:nextui": "cd src/web/nextui && npm run build && cp -r out/ ../../../dist/src/web/nextui;",
     "build:watch": "tsc --watch",
     "build": "tsc && cp src/*.html dist/src && cp src/python/wrapper.py dist/src/python && cp -r drizzle/ dist/ && npm run build:nextui && chmod +x dist/src/main.js",
     "prepare": "npm run install:nextui && npm run build:clean && npm run build",
@@ -65,6 +65,7 @@
     "@types/glob": "^8.1.0",
     "@types/jest": "^29.5.1",
     "@types/js-yaml": "^4.0.5",
+    "@types/node": "^20.12.12",
     "@types/node-fetch": "^2.6.4",
     "@types/nunjucks": "^3.2.2",
     "@types/opener": "^1.4.0",
@@ -72,9 +73,10 @@
     "@types/uuid": "^9.0.2",
     "babel-jest": "^29.5.0",
     "drizzle-kit": "^0.20.13",
+    "encoding": "^0.1.13",
     "jest": "^29.5.0",
     "jest-watch-typeahead": "^2.2.2",
-    "next": "^13.4.13",
+    "next": "^14.2.3",
     "prettier": "^2.8.8",
     "ts-jest": "^29.1.0",
     "ts-node": "^10.9.1",

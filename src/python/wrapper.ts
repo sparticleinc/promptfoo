@@ -33,7 +33,7 @@ export async function runPython(
   };
 
   try {
-    await fs.writeFile(tempJsonPath, safeJsonStringify(args));
+    await fs.writeFile(tempJsonPath, safeJsonStringify(args), 'utf-8');
 
     const results = await PythonShell.run('wrapper.py', pythonOptions);
     logger.debug(`Python script ${absPath} returned: ${results.join('\n')}`);
@@ -42,8 +42,7 @@ export async function runPython(
       result = JSON.parse(results[results.length - 1]);
     } catch (error) {
       throw new Error(
-        `Invalid JSON: ${(error as Error).message} when parsing result: ${
-          results[results.length - 1]
+        `Invalid JSON: ${(error as Error).message} when parsing result: ${results[results.length - 1]
         }\nStack Trace: ${(error as Error).stack}`,
       );
     }
@@ -55,15 +54,13 @@ export async function runPython(
     return result.data;
   } catch (error) {
     logger.error(
-      `Error running Python script: ${(error as Error).message}\nStack Trace: ${
-        (error as Error).stack?.replace('--- Python Traceback ---', 'Python Traceback: ') ||
-        'No Python traceback available'
+      `Error running Python script: ${(error as Error).message}\nStack Trace: ${(error as Error).stack?.replace('--- Python Traceback ---', 'Python Traceback: ') ||
+      'No Python traceback available'
       }`,
     );
     throw new Error(
-      `Error running Python script: ${(error as Error).message}\nStack Trace: ${
-        (error as Error).stack?.replace('--- Python Traceback ---', 'Python Traceback: ') ||
-        'No Python traceback available'
+      `Error running Python script: ${(error as Error).message}\nStack Trace: ${(error as Error).stack?.replace('--- Python Traceback ---', 'Python Traceback: ') ||
+      'No Python traceback available'
       }`,
     );
   } finally {
@@ -90,7 +87,7 @@ export async function runPythonCode(
     `temp-python-code-${Date.now()}-${Math.random().toString(16).slice(2)}.py`,
   );
   try {
-    await fs.writeFile(tempFilePath, code);
+    await fs.writeFile(tempFilePath, code, 'utf-8');
     // Necessary to await so temp file doesn't get deleted.
     const result = await runPython(tempFilePath, method, args);
     return result;
