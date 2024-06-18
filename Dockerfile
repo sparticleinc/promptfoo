@@ -48,7 +48,7 @@ COPY --from=builder /app/src/web/nextui/.next/standalone ./
 COPY --from=builder /app/src/web/nextui/.next/static ./.next/static
 COPY --from=builder /app/drizzle ./.next/server/drizzle
 
-RUN mkdir -p /root/.promptfoo/output
+# RUN mkdir -p /root/.promptfoo/output
 
 # Create a script to write environment variables to .env file
 RUN echo -e '#!/bin/sh\n\
