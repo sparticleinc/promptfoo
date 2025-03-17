@@ -68,7 +68,7 @@ workflows:
                 - main
                 # - prd
       - deploy:
-          name: promptfoo-deploy
+          name: felo-search-promptfoo
           docker-tag: ""
           path: "/home/ubuntu/cluster/web-app/promptfoo/deploy.yaml"
           deploy-name: promptfoo
