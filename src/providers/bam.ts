@@ -1,14 +1,14 @@
-import logger from '../logger';
-import { getCache, isCacheEnabled } from '../cache';
-import { REQUEST_TIMEOUT_MS } from './shared';
-
 import type {
   Client as GenAIClient,
   TextGenerationCreateInput,
   TextGenerationCreateOutput,
 } from '@ibm-generative-ai/node-sdk';
-
-import type { ApiProvider, EnvOverrides, ProviderResponse, TokenUsage } from '../types.js';
+import { getCache, isCacheEnabled } from '../cache';
+import { getEnvString } from '../envars';
+import logger from '../logger';
+import type { ApiProvider, ProviderResponse, TokenUsage } from '../types';
+import type { EnvOverrides } from '../types/env';
+import { REQUEST_TIMEOUT_MS } from './shared';
 
 interface BAMGenerationParameters {
   apiKey?: string | null;
@@ -69,7 +69,7 @@ interface BAMModerations {
       };
 }
 
-function convertResponse(response: TextGenerationCreateOutput): ProviderResponse {
+export function convertResponse(response: TextGenerationCreateOutput): ProviderResponse {
   const totalGeneratedTokens = response.results.reduce(
     (acc, result) => acc + result.generated_token_count,
     0,
@@ -92,7 +92,7 @@ function convertResponse(response: TextGenerationCreateOutput): ProviderResponse
   return providerResponse;
 }
 
-export class BAMChatProvider implements ApiProvider {
+export class BAMProvider implements ApiProvider {
   modelName: string;
   config?: BAMGenerationParameters;
   moderations?: BAMModerations;
@@ -115,7 +115,7 @@ export class BAMChatProvider implements ApiProvider {
     this.config = config;
     this.moderations = moderations;
     this.id = id ? () => id : this.id;
-    this.apiKey = process.env?.BAM_API_KAY;
+    this.apiKey = getEnvString('BAM_API_KEY');
   }
 
   id(): string {
@@ -134,7 +134,7 @@ export class BAMChatProvider implements ApiProvider {
           this.env?.[this.config.apiKeyEnvar as keyof EnvOverrides]
         : undefined) ||
       this.env?.BAM_API_KEY ||
-      process.env.BAM_API_KEY
+      getEnvString('BAM_API_KEY')
     );
   }
 
@@ -191,5 +191,3 @@ export class BAMChatProvider implements ApiProvider {
     }
   }
 }
-
-export class BAMEmbeddingProvider extends BAMChatProvider {}

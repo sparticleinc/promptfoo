@@ -1,8 +1,10 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
 prompts:
   - 'Write a tweet about {{topic}}'
   - 'Write a very concise, funny tweet about {{topic}}'
 
-providers: [openai:gpt-4]
+providers:
+  - openai:gpt-4
 
 tests:
   - vars:

@@ -1,58 +1,104 @@
 ---
 sidebar_position: 50
+description: Learn how to self-host promptfoo using Docker. This comprehensive guide walks you through setup, configuration, and troubleshooting for your own instance.
+keywords:
+  - AI testing
+  - configuration
+  - Docker
+  - LLM eval
+  - LLM evaluation
+  - promptfoo
+  - self-hosting
+  - setup guide
+  - team collaboration
 ---
 
 # Self-hosting
 
-promptfoo provides a Docker image that allows you to host a central server that stores your team's evals.
+promptfoo provides a Docker image that allows you to host a central server that stores your team's evals. With this, you can:
+
+- Share your evals with your team.
+- Run evals in your CI/CD pipeline and aggregate the results.
+- Keep sensitive data off of your local machine.
 
 The self-hosted app consists of:
 
-- Next.js application that runs the web ui.
-- filesystem store that persists the eval results.
-- key-value (KV) store that persists shared data (redis, filesystem, or memory).
+- The self-hosted app is an Express server that serves the web UI and API.
 
-## Setup
+## Using Pre-built Docker Images
 
-Clone the repository and see the provided [Dockerfile](https://github.com/promptfoo/promptfoo/blob/main/Dockerfile). Here's an example Docker command to build and run the container:
+A quick way to get started is to use a pre-built image.
 
-```bash
-docker build --build-arg NEXT_PUBLIC_PROMPTFOO_BASE_URL=http://localhost:3000 -t promptfoo-ui .
-docker run -p 3000:3000 -v /path/to/local_promptfoo:/root/.promptfoo promptfoo-ui
-```
+To use a pre-built image:
 
-- `NEXT_PUBLIC_PROMPTFOO_BASE_URL` tells the web app where to send the API request when the user clicks the 'Share' button. This should be configured to match the URL of your self-hosted instance.
-- The `-v` argument maps the working directory `/root/.promptfoo` to a path on your local filesystem `/path/to/local_promptfoo`. Replace this path with your preferred local path. You can omit this argument, but then your evals won't be persisted.
-
-You can also set API credentials on the running Docker instance so that evals can be run on the server. For example, we'll set the OpenAI API key so users can run evals directly from the web ui:
+1. Pull the image:
 
 ```bash
-docker run -p 3000:3000 -e -e OPENAI_API_KEY=sk-abc123 promptfoo-ui
+docker pull ghcr.io/promptfoo/promptfoo:latest
 ```
 
-## Configuring eval storage
+You can use specific version tags instead of `latest` to pin to a specific version.
 
-promptfoo uses a sqlite database located in `/root/.promptfoo` on the image, as well as some other files in that directory to track state. Be sure to persist this directory (and the `promptfoo.db` file specifically) in order to save evals.
+2. Run the container:
 
-## Configuring the KV Store
+```bash
+docker run -d --name promptfoo_container -p 3000:3000 -v /path/to/local_promptfoo:/home/promptfoo/.promptfoo ghcr.io/promptfoo/promptfoo:latest
+```
 
-By default, the application uses an in-memory store for shared results. However, you can configure it to use Redis or the filesystem by setting the appropriate environment variables. Below is a table of environment variables you can set to configure the KV store:
+Key points:
 
-| Environment Variable             | Description                                                    | Default Value       |
-| -------------------------------- | -------------------------------------------------------------- | ------------------- |
-| `PROMPTFOO_SHARE_STORE_TYPE`     | The type of store to use (`memory`, `redis`, or `filesystem`). | `memory`            |
-| `PROMPTFOO_SHARE_TTL`            | The time-to-live (TTL) for shared URLs in seconds.             | `1209600` (2 weeks) |
-| `PROMPTFOO_SHARE_REDIS_HOST`     | The Redis host.                                                | -                   |
-| `PROMPTFOO_SHARE_REDIS_PORT`     | The Redis port.                                                | -                   |
-| `PROMPTFOO_SHARE_REDIS_PASSWORD` | The Redis password.                                            | -                   |
-| `PROMPTFOO_SHARE_REDIS_DB`       | The Redis database number.                                     | `0`                 |
-| `PROMPTFOO_SHARE_STORE_PATH`     | The filesystem path for storing shared results.                | `share-store`       |
+- `-v /path/to/local_promptfoo:/home/promptfoo/.promptfoo` maps the container's working directory to your local filesystem. Replace `/path/to/local_promptfoo` with your preferred path.
+- Omitting the `-v` argument will result in non-persistent evals.
+- Add any api keys as environment variables on the docker container. For example, `-e OPENAI_API_KEY=sk-abc123` sets the OpenAI API key so users can run evals directly from the web UI. Replace `sk-abc123` with your actual API key.
 
-## Pointing the promptfoo client to your hosted instance
+## Building from Source
+
+### 1. Clone the Repository
+
+First, clone the promptfoo repository from GitHub:
+
+```sh
+git clone https://github.com/promptfoo/promptfoo.git
+cd promptfoo
+```
+
+### 2. Build the Docker Image
+
+Build the Docker image with the following command:
+
+```sh
+docker build -t promptfoo .
+```
+
+### 3. Run the Docker Container
+
+Launch the Docker container using this command:
+
+```sh
+docker run -d --name promptfoo_container -p 3000:3000 -v /path/to/local_promptfoo:/home/promptfoo/.promptfoo promptfoo
+```
+
+## Advanced Configuration
+
+### Eval Storage
+
+promptfoo uses a SQLite database (`promptfoo.db`) located in `/home/promptfoo/.promptfoo` on the image. Ensure this directory is persisted to save your evals. Pass `-v /path/to/local_promptfoo:/home/promptfoo/.promptfoo` to the `docker run` command to persist the evals.
+
+### Config Directory
+
+You can override the default configuration directory and SQLite database location by setting the `PROMPTFOO_CONFIG_DIR` environment variable. For example, if you run the container with:
+
+```sh
+docker run -d --name promptfoo_container -p 3000:3000 -v /path/to/local_promptfoo:/home/promptfoo/.promptfoo -e PROMPTFOO_CONFIG_DIR=/path/to/local_promptfoo promptfoo
+```
+
+then promptfoo will use `/path/to/local_promptfoo` for its configuration and the `promptfoo.db` file.
+
+## Pointing promptfoo to your hosted instance
 
 When self-hosting, you need to set the environment variables so that the `promptfoo share` command knows how to reach your hosted application. Here's an example:
 
-```bash
+```sh
 PROMPTFOO_REMOTE_API_BASE_URL=http://localhost:3000 PROMPTFOO_REMOTE_APP_BASE_URL=http://localhost:3000 promptfoo share -y
 ```
 
@@ -69,3 +115,48 @@ sharing:
   apiBaseUrl: http://localhost:3000
   appBaseUrl: http://localhost:3000
 ```
+
+## Specifications
+
+Promptfoo comes in two parts:
+
+- A client tool for running evals and interacting with the Promptfoo API.
+- A web server that stores and analyzes results, serves dashboards, enables sharing, and provides a UI for viewing reports from other users.
+
+### Client
+
+The Promptfoo client is a Node.js application that runs on all modern operating systems. It can be run on a laptop or personal computer, in a CI/CD pipeline, or on a server.
+
+#### Requirements
+
+- **Operating System**: Linux, MacOS, Windows (Linux recommended for server installations)
+- **CPU**: 2+ CPU cores, 2.0GHz or faster recommended
+- **GPU**: Not required
+- **RAM**: 4 GB
+- **Storage**: 10 GB
+- **Dependencies**:
+  - **Node.js**: Version 18 or newer
+  - **Package Manager**: npm (comes with Node.js)
+
+### Server
+
+The Promptfoo server is a Node.js application that runs on a server. It can be run in a Docker container or as a standalone Node.js application.
+
+Note that the server is _optional_ for running evals or red teams with Promptfoo. You can run evals locally or in a CI/CD pipeline without running the server.
+
+#### Requirements
+
+Docker Environment
+
+- **Docker Engine**: 20.10 or newer
+- **Docker Compose**: 2.x or newer
+
+Results Server Host
+
+- **OS**: Anything capable of running Docker (Kubernetes, Azure Container Instances, etc.)
+- **CPU**: 4+ cores
+- **RAM**: 8GB minimum (16GB recommended)
+- **Storage**:
+  - 100GB+ for container volumes and database
+  - Device mapper or overlay2 storage driver recommended
+  - SSD storage recommended for database volumes

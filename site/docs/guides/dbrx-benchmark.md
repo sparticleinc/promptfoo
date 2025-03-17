@@ -17,14 +17,14 @@ The end result will be a custom benchmark that looks similar to this:
 ## Requirements
 
 - OpenRouter API key for DBRX and Mixtral.
-- OpenAI API key for GPT-3.5.
-- Node 16+
+- OpenAI API key for gpt-4o-mini
+- Node 18+
 
 ## Step 1: Initial Setup
 
 Create a new directory for your comparison project and initialize it with `promptfoo init`.
 
-```bash
+```sh
 npx promptfoo@latest init dbrx-benchmark
 ```
 
@@ -48,12 +48,12 @@ providers:
       apiBaseUrl: https://openrouter.ai/api/v1
       apiKeyEnvar: OPENROUTER_API_KEY
       temperature: 0
-  - id: openai:gpt-3.5-turbo-0613
+  - id: openai:gpt-4o-mini
 ```
 
 Set your API keys as environment variables:
 
-```bash
+```sh
 export OPENROUTER_API_KEY=your_openrouter_api_key
 export OPENAI_API_KEY=your_openai_api_key
 ```
@@ -78,7 +78,7 @@ providers:
       // highlight-start
       temperature: 0
       // highlight-end
-  - id: openai:gpt-3.5-turbo-0613
+  - id: openai:gpt-4o-mini
     // highlight-start
     config:
       temperature: 0
@@ -179,7 +179,7 @@ Many types of assertions are supported, both deterministic and LLM-graded. See [
 
 With everything configured, run the evaluation using the `promptfoo` CLI:
 
-```bash
+```
 npx promptfoo@latest eval
 ```
 
@@ -187,7 +187,7 @@ This command will execute each test case against each configured model and recor
 
 To visualize the results, use the `promptfoo` viewer:
 
-```bash
+```sh
 npx promptfoo@latest view
 ```
 
@@ -201,7 +201,7 @@ Clicking into a specific output will show details on the assertions:
 
 You can also output the results to a file in various formats, such as JSON, YAML, or CSV:
 
-```bash
+```
 npx promptfoo@latest eval -o results.csv
 ```
 

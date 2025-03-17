@@ -1,7 +1,7 @@
-import logger from '../logger';
 import { fetchWithCache } from '../cache';
-
-import {
+import { getEnvString } from '../envars';
+import logger from '../logger';
+import type {
   ApiProvider,
   ApiSimilarityProvider,
   ProviderClassificationResponse,
@@ -67,17 +67,22 @@ export class HuggingfaceTextGenerationProvider implements ApiProvider {
   }
 
   getApiKey(): string | undefined {
-    return this.config.apiKey || process.env.HF_API_TOKEN;
+    return this.config.apiKey || getEnvString('HF_TOKEN') || getEnvString('HF_API_TOKEN');
   }
 
   getConfig() {
-    return Object.keys(this.config).reduce((options, key) => {
-      const optionName = key as keyof HuggingfaceTextGenerationOptions;
-      if (HuggingFaceTextGenerationKeys.has(optionName)) {
-        options[optionName] = this.config[optionName];
-      }
-      return options;
-    }, {} as Partial<Record<keyof HuggingfaceTextGenerationOptions, number | boolean | string | undefined>>);
+    return Object.keys(this.config).reduce(
+      (options, key) => {
+        const optionName = key as keyof HuggingfaceTextGenerationOptions;
+        if (HuggingFaceTextGenerationKeys.has(optionName)) {
+          options[optionName] = this.config[optionName];
+        }
+        return options;
+      },
+      {} as Partial<
+        Record<keyof HuggingfaceTextGenerationOptions, number | boolean | string | undefined>
+      >,
+    );
   }
 
   async callApi(prompt: string): Promise<ProviderResponse> {
@@ -159,7 +164,7 @@ export class HuggingfaceTextClassificationProvider implements ApiProvider {
   }
 
   getApiKey(): string | undefined {
-    return this.config.apiKey || process.env.HF_API_TOKEN;
+    return this.config.apiKey || getEnvString('HF_TOKEN') || getEnvString('HF_API_TOKEN');
   }
 
   async callClassificationApi(prompt: string): Promise<ProviderClassificationResponse> {
@@ -249,7 +254,7 @@ export class HuggingfaceFeatureExtractionProvider implements ApiProvider {
   }
 
   getApiKey(): string | undefined {
-    return this.config.apiKey || process.env.HF_API_TOKEN;
+    return this.config.apiKey || getEnvString('HF_TOKEN') || getEnvString('HF_API_TOKEN');
   }
 
   async callApi(): Promise<ProviderResponse> {
@@ -331,7 +336,7 @@ export class HuggingfaceSentenceSimilarityProvider implements ApiSimilarityProvi
   }
 
   getApiKey(): string | undefined {
-    return this.config.apiKey || process.env.HF_API_TOKEN;
+    return this.config.apiKey || getEnvString('HF_TOKEN') || getEnvString('HF_API_TOKEN');
   }
 
   toString(): string {
@@ -419,6 +424,10 @@ export class HuggingfaceTokenExtractionProvider implements ApiProvider {
     return `huggingface:token-classification:${this.modelName}`;
   }
 
+  getApiKey(): string | undefined {
+    return this.config.apiKey || getEnvString('HF_TOKEN') || getEnvString('HF_API_TOKEN');
+  }
+
   async callClassificationApi(input: string): Promise<ProviderClassificationResponse> {
     const params = {
       inputs: input,
@@ -426,7 +435,7 @@ export class HuggingfaceTokenExtractionProvider implements ApiProvider {
         aggregation_strategy: this.config.aggregation_strategy || 'simple',
       },
       options: {
-        use_cache: this.config.use_cache !== undefined ? this.config.use_cache : true,
+        use_cache: this.config.use_cache === undefined ? true : this.config.use_cache,
         wait_for_model: this.config.wait_for_model || false,
       },
     };
@@ -442,9 +451,7 @@ export class HuggingfaceTokenExtractionProvider implements ApiProvider {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            ...(process.env.HF_API_TOKEN
-              ? { Authorization: `Bearer ${process.env.HF_API_TOKEN}` }
-              : {}),
+            ...(this.getApiKey() ? { Authorization: `Bearer ${this.getApiKey()}` } : {}),
           },
           body: JSON.stringify(params),
         },

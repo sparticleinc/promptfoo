@@ -27,7 +27,7 @@ Before starting, ensure you have the following:
 
 Create a new directory for your benchmarking project:
 
-```bash
+```sh
 npx promptfoo@latest init gemini-gpt-comparison
 ```
 
@@ -35,8 +35,9 @@ Edit the `promptfooconfig.yaml` file to include the `gemini-pro` model from Goog
 
 ```yaml title=promptfooconfig.yaml
 providers:
-  - openai:gpt-3.5-turbo
-  - openai:gpt-4
+  - vertex:gemini-pro
+  - openai:gpt-4o-mini
+  - openai:gpt-4o
 ```
 
 ## Step 2: Set up the prompts
@@ -58,10 +59,10 @@ prompts:
 providers:
   - id: vertex:gemini-pro
     prompts: gemini_prompt
-  - id: openai:gpt-3.5-turbo
+  - id: openai:gpt-4o-mini
     prompts:
       - gpt_prompt
-  - id: openai:gpt-4
+  - id: openai:gpt-4o
     prompts:
       - gpt_prompt
 ```
@@ -86,7 +87,7 @@ In this case, I just took some examples from a [Hacker News thread](https://news
 
 Execute the comparison using the `promptfoo eval` command:
 
-```bash
+```
 npx promptfoo@latest eval
 ```
 
@@ -96,7 +97,7 @@ This will run the test cases against Gemini, GPT 3.5, and GPT 4 and output the r
 
 Then, use the `promptfoo view` command to open the viewer and compare the results visually:
 
-```bash
+```sh
 npx promptfoo@latest view
 ```
 
@@ -120,7 +121,9 @@ tests:
     // highlight-start
     assert:
       - type: icontains-any
-        value: [1, one]
+        value:
+          - 1
+          - one
     // highlight-end
   - vars:
       question: If you place an orange below a plate in the living room, and then move the plate to the kitchen, where is the orange now?

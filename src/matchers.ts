@@ -1,7 +1,9 @@
-import invariant from 'tiny-invariant';
+import dedent from 'dedent';
+import path from 'path';
+import { loadFromJavaScriptFile } from './assertions/utils';
+import cliState from './cliState';
+import { getEnvString } from './envars';
 import logger from './logger';
-import { getNunjucksEngine } from './util';
-import { loadApiProvider } from './providers';
 import {
   ANSWER_RELEVANCY_GENERATE,
   SELECT_BEST_PROMPT,
@@ -15,23 +17,32 @@ import {
   OPENAI_CLOSED_QA_PROMPT,
   OPENAI_FACTUALITY_PROMPT,
 } from './prompts';
-
+import { loadApiProvider } from './providers';
+import { getDefaultProviders } from './providers/defaults';
+import { LLAMA_GUARD_REPLICATE_PROVIDER } from './redteam/constants';
+import { shouldGenerateRemote } from './redteam/remoteGeneration';
+import { doRemoteGrading } from './remoteGrading';
 import type {
   ApiClassificationProvider,
   ApiEmbeddingProvider,
+  ApiModerationProvider,
   ApiProvider,
   ApiSimilarityProvider,
+  Assertion,
   GradingConfig,
   GradingResult,
   ProviderOptions,
+  ProviderType,
   ProviderTypeMap,
   TokenUsage,
-  ProviderType,
-  ApiModerationProvider,
 } from './types';
-import { getDefaultProviders } from './providers/defaults';
+import { maybeLoadFromExternalFile } from './util';
+import { isJavascriptFile } from './util/file';
+import invariant from './util/invariant';
+import { extractJsonObjects } from './util/json';
+import { getNunjucksEngine } from './util/templates';
 
-const nunjucks = getNunjucksEngine();
+const nunjucks = getNunjucksEngine(undefined, false, true);
 
 function cosineSimilarity(vecA: number[], vecB: number[]) {
   if (vecA.length !== vecB.length) {
@@ -53,7 +64,7 @@ function fromVars(vars?: Record<string, string | object>) {
     if (typeof value === 'object') {
       ret[key] = JSON.stringify(value);
     } else {
-      ret[key] = value;
+      ret[key] = JSON.stringify(value).slice(1, -1);
     }
   }
 
@@ -123,7 +134,7 @@ export async function getAndCheckProvider(
   defaultProvider: ApiProvider | null,
   checkName: string,
 ): Promise<ApiProvider> {
-  let matchedProvider = await getGradingProvider(type, provider, defaultProvider);
+  const matchedProvider = await getGradingProvider(type, provider, defaultProvider);
   if (!matchedProvider) {
     if (defaultProvider) {
       logger.warn(`No provider of type ${type} found for '${checkName}', falling back to default`);
@@ -168,6 +179,8 @@ function fail(reason: string, tokensUsed?: Partial<TokenUsage>): Omit<GradingRes
       total: tokensUsed?.total || 0,
       prompt: tokensUsed?.prompt || 0,
       completion: tokensUsed?.completion || 0,
+      cached: tokensUsed?.cached || 0,
+      completionDetails: tokensUsed?.completionDetails,
     },
   };
 }
@@ -179,10 +192,24 @@ export async function matchesSimilarity(
   inverse: boolean = false,
   grading?: GradingConfig,
 ): Promise<Omit<GradingResult, 'assertion'>> {
-  let finalProvider = (await getAndCheckProvider(
+  if (cliState.config?.redteam && shouldGenerateRemote()) {
+    try {
+      return doRemoteGrading({
+        task: 'similar',
+        expected,
+        output,
+        threshold,
+        inverse,
+      });
+    } catch (error) {
+      return fail(`Could not perform remote grading: ${error}`);
+    }
+  }
+
+  const finalProvider = (await getAndCheckProvider(
     'embedding',
     grading?.provider,
-    getDefaultProviders().embeddingProvider,
+    (await getDefaultProviders()).embeddingProvider,
     'similarity check',
   )) as ApiEmbeddingProvider | ApiSimilarityProvider;
 
@@ -191,6 +218,12 @@ export async function matchesSimilarity(
     total: 0,
     prompt: 0,
     completion: 0,
+    cached: 0,
+    completionDetails: {
+      reasoning: 0,
+      acceptedPrediction: 0,
+      rejectedPrediction: 0,
+    },
   };
 
   if ('callSimilarityApi' in finalProvider) {
@@ -217,6 +250,19 @@ export async function matchesSimilarity(
       completion:
         (expectedEmbedding.tokenUsage?.completion || 0) +
         (outputEmbedding.tokenUsage?.completion || 0),
+      cached:
+        (expectedEmbedding.tokenUsage?.cached || 0) + (outputEmbedding.tokenUsage?.cached || 0),
+      completionDetails: {
+        reasoning:
+          (expectedEmbedding.tokenUsage?.completionDetails?.reasoning || 0) +
+          (outputEmbedding.tokenUsage?.completionDetails?.reasoning || 0),
+        acceptedPrediction:
+          (expectedEmbedding.tokenUsage?.completionDetails?.acceptedPrediction || 0) +
+          (outputEmbedding.tokenUsage?.completionDetails?.acceptedPrediction || 0),
+        rejectedPrediction:
+          (expectedEmbedding.tokenUsage?.completionDetails?.rejectedPrediction || 0) +
+          (outputEmbedding.tokenUsage?.completionDetails?.rejectedPrediction || 0),
+      },
     };
 
     if (expectedEmbedding.error || outputEmbedding.error) {
@@ -234,7 +280,9 @@ export async function matchesSimilarity(
   } else {
     throw new Error('Provider must implement callSimilarityApi or callEmbeddingApi');
   }
-  const pass = inverse ? similarity <= threshold : similarity >= threshold;
+  const pass = inverse
+    ? similarity <= threshold + Number.EPSILON
+    : similarity >= threshold - Number.EPSILON;
   const greaterThanReason = `Similarity ${similarity.toFixed(
     2,
   )} is greater than threshold ${threshold}`;
@@ -269,7 +317,7 @@ export async function matchesClassification(
   threshold: number,
   grading?: GradingConfig,
 ): Promise<Omit<GradingResult, 'assertion'>> {
-  let finalProvider = (await getAndCheckProvider(
+  const finalProvider = (await getAndCheckProvider(
     'classification',
     grading?.provider,
     null,
@@ -288,7 +336,7 @@ export async function matchesClassification(
     score = resp.classification[expected] || 0;
   }
 
-  if (score >= threshold) {
+  if (score >= threshold - Number.EPSILON) {
     const reason =
       expected === undefined
         ? `Maximum classification score ${score.toFixed(2)} >= ${threshold}`
@@ -306,30 +354,88 @@ export async function matchesClassification(
   };
 }
 
-export async function matchesLlmRubric(
-  expected: string,
-  output: string,
+async function loadRubricPrompt(
+  rubricPrompt: string | object | undefined,
+  defaultPrompt: string,
+): Promise<string> {
+  if (!rubricPrompt) {
+    return defaultPrompt;
+  }
+
+  if (
+    typeof rubricPrompt === 'string' &&
+    rubricPrompt.startsWith('file://') &&
+    isJavascriptFile(rubricPrompt)
+  ) {
+    const basePath = cliState.basePath || '';
+    let filePath = rubricPrompt.slice('file://'.length);
+
+    const [pathPart, functionName] = filePath.split(':');
+    filePath = path.resolve(basePath, pathPart);
+    rubricPrompt = await loadFromJavaScriptFile(filePath, functionName, []);
+  } else {
+    // Load from external file if needed
+    rubricPrompt = maybeLoadFromExternalFile(rubricPrompt);
+  }
+
+  // Stringify if it's an object
+  if (typeof rubricPrompt === 'object') {
+    rubricPrompt = JSON.stringify(rubricPrompt);
+  }
+
+  invariant(typeof rubricPrompt === 'string', 'rubricPrompt must be a string');
+  return rubricPrompt;
+}
+
+export async function renderLlmRubricPrompt(
+  rubric: string,
+  llmOutput: string,
   grading?: GradingConfig,
   vars?: Record<string, string | object>,
-): Promise<Omit<GradingResult, 'assertion'>> {
+) {
+  const rubricPrompt = await loadRubricPrompt(grading?.rubricPrompt, DEFAULT_GRADING_PROMPT);
+
+  return nunjucks.renderString(rubricPrompt, {
+    output: JSON.stringify(llmOutput).slice(1, -1),
+    rubric: JSON.stringify(rubric).slice(1, -1),
+    ...fromVars(vars),
+  });
+}
+
+export async function matchesLlmRubric(
+  rubric: string,
+  llmOutput: string,
+  grading?: GradingConfig,
+  vars?: Record<string, string | object>,
+  assertion?: Assertion | null,
+): Promise<GradingResult> {
   if (!grading) {
     throw new Error(
       'Cannot grade output without grading config. Specify --grader option or grading config.',
     );
   }
 
-  let rubricPrompt = grading?.rubricPrompt || DEFAULT_GRADING_PROMPT;
-  invariant(typeof rubricPrompt === 'string', 'rubricPrompt must be a string');
-  const prompt = nunjucks.renderString(rubricPrompt, {
-    output: JSON.stringify(output).slice(1, -1),
-    rubric: JSON.stringify(expected).slice(1, -1),
-    ...fromVars(vars),
-  });
+  if (!grading.rubricPrompt && cliState.config?.redteam && shouldGenerateRemote()) {
+    return {
+      ...(await doRemoteGrading({
+        task: 'llm-rubric',
+        rubric,
+        output: llmOutput,
+        vars: vars || {},
+      })),
+      assertion,
+    };
+  }
 
-  let finalProvider = await getAndCheckProvider(
+  const prompt = await renderLlmRubricPrompt(rubric, llmOutput, grading, vars);
+
+  const defaultProviders = await getDefaultProviders();
+  const defaultProvider =
+    defaultProviders.llmRubricProvider || defaultProviders.gradingJsonProvider;
+  const finalProvider = await getAndCheckProvider(
     'text',
     grading.provider,
-    getDefaultProviders().gradingJsonProvider,
+    defaultProvider,
     'llm-rubric check',
   );
   const resp = await finalProvider.callApi(prompt);
@@ -339,23 +445,55 @@ export async function matchesLlmRubric(
 
   invariant(typeof resp.output === 'string', 'llm-rubric produced malformed response');
   try {
-    const firstOpeningBrace = resp.output.indexOf('{');
-    const firstClosingBrace = resp.output.indexOf('}');
-    const jsonStr = resp.output.substring(firstOpeningBrace, firstClosingBrace + 1);
-    const parsed = JSON.parse(jsonStr) as Partial<GradingResult>;
-    const pass = parsed.pass ?? (typeof parsed.score === 'undefined' ? true : parsed.score > 0);
+    const jsonObjects = extractJsonObjects(resp.output);
+    if (jsonObjects.length === 0) {
+      return fail('Could not extract JSON from llm-rubric response', resp.tokenUsage);
+    }
+
+    // expects properties pass, score, and reason
+    const parsed = jsonObjects[0] as Partial<GradingResult>;
+
+    let pass = parsed.pass ?? true;
+    if (typeof pass !== 'boolean') {
+      pass = /^(true|yes|pass|y)$/i.test(String(pass));
+    }
+
+    let score = parsed.score;
+    if (typeof score !== 'number') {
+      score = Number.isFinite(Number(score)) ? Number(score) : Number(pass);
+    }
+
+    const threshold =
+      typeof assertion?.threshold === 'string' ? Number(assertion.threshold) : assertion?.threshold;
+    if (typeof threshold === 'number' && Number.isFinite(threshold)) {
+      pass = pass && score >= threshold;
+    }
+
+    const reason =
+      parsed.reason || (pass ? 'Grading passed' : `Score ${score} below threshold ${threshold}`);
+
     return {
+      assertion,
       pass,
-      score: parsed.score ?? (pass ? 1.0 : 0.0),
-      reason: parsed.reason || (pass ? 'Grading passed' : 'Grading failed'),
+      score,
+      reason,
       tokensUsed: {
         total: resp.tokenUsage?.total || 0,
         prompt: resp.tokenUsage?.prompt || 0,
         completion: resp.tokenUsage?.completion || 0,
+        cached: resp.tokenUsage?.cached || 0,
+        completionDetails: parsed.tokensUsed?.completionDetails || {
+          reasoning: 0,
+          acceptedPrediction: 0,
+          rejectedPrediction: 0,
+        },
       },
     };
   } catch (err) {
-    return fail(`llm-rubric produced malformed response: ${resp.output}`, resp.tokenUsage);
+    return fail(
+      `llm-rubric produced malformed response: ${err}\n\n${resp.output}`,
+      resp.tokenUsage,
+    );
   }
 }
 
@@ -372,8 +510,7 @@ export async function matchesFactuality(
     );
   }
 
-  const rubricPrompt = grading?.rubricPrompt || OPENAI_FACTUALITY_PROMPT;
-  invariant(typeof rubricPrompt === 'string', 'rubricPrompt must be a string');
+  const rubricPrompt = await loadRubricPrompt(grading?.rubricPrompt, OPENAI_FACTUALITY_PROMPT);
   const prompt = nunjucks.renderString(rubricPrompt, {
     input: JSON.stringify(input).slice(1, -1),
     ideal: JSON.stringify(expected).slice(1, -1),
@@ -381,10 +518,10 @@ export async function matchesFactuality(
     ...fromVars(vars),
   });
 
-  let finalProvider = await getAndCheckProvider(
+  const finalProvider = await getAndCheckProvider(
     'text',
     grading.provider,
-    getDefaultProviders().gradingProvider,
+    (await getDefaultProviders()).gradingProvider,
     'factuality check',
   );
   const resp = await finalProvider.callApi(prompt);
@@ -447,6 +584,12 @@ export async function matchesFactuality(
         total: resp.tokenUsage?.total || 0,
         prompt: resp.tokenUsage?.prompt || 0,
         completion: resp.tokenUsage?.completion || 0,
+        cached: resp.tokenUsage?.cached || 0,
+        completionDetails: resp.tokenUsage?.completionDetails || {
+          reasoning: 0,
+          acceptedPrediction: 0,
+          rejectedPrediction: 0,
+        },
       },
     };
   } catch (err) {
@@ -467,8 +610,7 @@ export async function matchesClosedQa(
     );
   }
 
-  const rubricPrompt = grading?.rubricPrompt || OPENAI_CLOSED_QA_PROMPT;
-  invariant(typeof rubricPrompt === 'string', 'rubricPrompt must be a string');
+  const rubricPrompt = await loadRubricPrompt(grading?.rubricPrompt, OPENAI_CLOSED_QA_PROMPT);
   const prompt = nunjucks.renderString(rubricPrompt, {
     input: JSON.stringify(input).slice(1, -1),
     criteria: JSON.stringify(expected).slice(1, -1),
@@ -476,10 +618,10 @@ export async function matchesClosedQa(
     ...fromVars(vars),
   });
 
-  let finalProvider = await getAndCheckProvider(
+  const finalProvider = await getAndCheckProvider(
     'text',
     grading.provider,
-    getDefaultProviders().gradingProvider,
+    (await getDefaultProviders()).gradingProvider,
     'model-graded-closedqa check',
   );
   const resp = await finalProvider.callApi(prompt);
@@ -489,11 +631,11 @@ export async function matchesClosedQa(
 
   invariant(typeof resp.output === 'string', 'model-graded-closedqa produced malformed response');
   try {
-    const pass = resp.output.endsWith('Y');
+    const pass = resp.output.trimEnd().endsWith('Y');
     let reason;
     if (pass) {
       reason = 'The submission meets the criterion';
-    } else if (resp.output.endsWith('N')) {
+    } else if (resp.output.trimEnd().endsWith('N')) {
       reason = `The submission does not meet the criterion:\n${resp.output}`;
     } else {
       reason = `Model grader produced a malformed response:\n${resp.output}`;
@@ -506,11 +648,108 @@ export async function matchesClosedQa(
         total: resp.tokenUsage?.total || 0,
         prompt: resp.tokenUsage?.prompt || 0,
         completion: resp.tokenUsage?.completion || 0,
+        cached: resp.tokenUsage?.cached || 0,
+        completionDetails: resp.tokenUsage?.completionDetails || {
+          reasoning: 0,
+          acceptedPrediction: 0,
+          rejectedPrediction: 0,
+        },
       },
     };
   } catch (err) {
     return fail(`Error parsing output: ${(err as Error).message}`, resp.tokenUsage);
   }
+}
+
+export async function matchesGEval(
+  criteria: string,
+  input: string,
+  output: string,
+  threshold: number,
+  grading?: GradingConfig,
+): Promise<Omit<GradingResult, 'assertion'>> {
+  if (!input) {
+    throw Error('No source text to estimate reply');
+  }
+
+  const maxScore = 10;
+  const textProvider = await getAndCheckProvider(
+    'text',
+    grading?.provider,
+    (await getDefaultProviders()).gradingProvider,
+    'reply geval check',
+  );
+
+  const promptSteps = dedent`
+    Given an evaluation criteria which outlines how you should judge some text, generate 3-4 concise evaluation steps for any text based on the criteria below.
+
+    Evaluation Criteria:
+    ${criteria}
+
+    **
+    IMPORTANT: Please make sure to only return in minified JSON format, with the "steps" key as a list of strings. No additional words, explanation or formatting is needed.
+    Example JSON:
+    {"steps": <list_of_strings>}
+    **
+
+    JSON:
+    `;
+
+  const respSteps = await textProvider.callApi(promptSteps);
+  let steps;
+
+  try {
+    // NOTE: use regexp for reliable, because sometimes LLM wraps response to markdown format ```json...```
+    steps = JSON.parse(respSteps.output.match(/\{"steps".+\}/g)[0]).steps;
+
+    if (!steps.length) {
+      return fail('LLM does not propose any evaluation step');
+    }
+  } catch {
+    return fail(`LLM-proposed evaluation steps are not in JSON format: ${respSteps.output}`);
+  }
+
+  const promptText = dedent`
+    You will be given one Reply for a Source Text below. Your task is to rate the Reply on one metric.
+    Please make sure you read and understand these instructions carefully. Please keep this document open while reviewing, and refer to it as needed.
+
+    Evaluation Criteria:
+    ${criteria}
+
+    Evaluation Steps:
+    - ${steps.join('\n- ')}
+    - Given the evaluation steps, return a JSON with two keys: 1) a "score" key ranging from 0 - ${maxScore}, with ${maxScore} being that it follows the Evaluation Criteria outlined in the Evaluation Steps and 0 being that it does not; 2) a "reason" key, a reason for the given score, but DO NOT QUOTE THE SCORE in your reason. Please mention specific information from Source Text and Reply in your reason, but be very concise with it!
+
+    Source Text:
+    ${input}
+
+    Reply:
+    ${output}
+
+    **
+    IMPORTANT: Please make sure to only return in minified JSON format, with the "score" and "reason" key. No additional words, explanation or formatting is needed.
+
+    Example JSON:
+    {"score":0,"reason":"The text does not follow the evaluation steps provided."}
+    **
+
+    JSON:
+    `;
+
+  const resp = await textProvider.callApi(promptText);
+  let result;
+
+  try {
+    result = JSON.parse(resp.output.match(/\{.+\}/g)[0]);
+  } catch {
+    return fail(`LLM-proposed evaluation result is not in JSON format: ${resp.output}`);
+  }
+
+  return {
+    pass: result.score / maxScore >= threshold,
+    score: result.score / maxScore,
+    reason: result.reason,
+  };
 }
 
 export async function matchesAnswerRelevance(
@@ -519,16 +758,16 @@ export async function matchesAnswerRelevance(
   threshold: number,
   grading?: GradingConfig,
 ): Promise<Omit<GradingResult, 'assertion'>> {
-  let embeddingProvider = await getAndCheckProvider(
+  const embeddingProvider = await getAndCheckProvider(
     'embedding',
     grading?.provider,
-    getDefaultProviders().embeddingProvider,
+    (await getDefaultProviders()).embeddingProvider,
     'answer relevancy check',
   );
-  let textProvider = await getAndCheckProvider(
+  const textProvider = await getAndCheckProvider(
     'text',
     grading?.provider,
-    getDefaultProviders().gradingProvider,
+    (await getDefaultProviders()).gradingProvider,
     'answer relevancy check',
   );
 
@@ -536,13 +775,18 @@ export async function matchesAnswerRelevance(
     total: 0,
     prompt: 0,
     completion: 0,
+    cached: 0,
+    completionDetails: {
+      reasoning: 0,
+      acceptedPrediction: 0,
+      rejectedPrediction: 0,
+    },
   };
 
   const candidateQuestions: string[] = [];
   for (let i = 0; i < 3; i++) {
     // TODO(ian): Parallelize
-    const rubricPrompt = grading?.rubricPrompt || ANSWER_RELEVANCY_GENERATE;
-    invariant(typeof rubricPrompt === 'string', 'rubricPrompt must be a string');
+    const rubricPrompt = await loadRubricPrompt(grading?.rubricPrompt, ANSWER_RELEVANCY_GENERATE);
     const promptText = nunjucks.renderString(rubricPrompt, {
       answer: JSON.stringify(output).slice(1, -1),
     });
@@ -551,6 +795,18 @@ export async function matchesAnswerRelevance(
       tokensUsed.total += resp.tokenUsage?.total || 0;
       tokensUsed.prompt += resp.tokenUsage?.prompt || 0;
       tokensUsed.completion += resp.tokenUsage?.completion || 0;
+      tokensUsed.cached += resp.tokenUsage?.cached || 0;
+      tokensUsed.completionDetails = {
+        reasoning:
+          (tokensUsed.completionDetails?.reasoning || 0) +
+          (resp.tokenUsage?.completionDetails?.reasoning || 0),
+        acceptedPrediction:
+          (tokensUsed.completionDetails?.acceptedPrediction || 0) +
+          (resp.tokenUsage?.completionDetails?.acceptedPrediction || 0),
+        rejectedPrediction:
+          (tokensUsed.completionDetails?.rejectedPrediction || 0) +
+          (resp.tokenUsage?.completionDetails?.rejectedPrediction || 0),
+      };
       return fail(resp.error || 'No output', tokensUsed);
     }
 
@@ -571,6 +827,18 @@ export async function matchesAnswerRelevance(
     tokensUsed.total += inputEmbeddingResp.tokenUsage?.total || 0;
     tokensUsed.prompt += inputEmbeddingResp.tokenUsage?.prompt || 0;
     tokensUsed.completion += inputEmbeddingResp.tokenUsage?.completion || 0;
+    tokensUsed.cached += inputEmbeddingResp.tokenUsage?.cached || 0;
+    tokensUsed.completionDetails = {
+      reasoning:
+        (tokensUsed.completionDetails?.reasoning || 0) +
+        (inputEmbeddingResp.tokenUsage?.completionDetails?.reasoning || 0),
+      acceptedPrediction:
+        (tokensUsed.completionDetails?.acceptedPrediction || 0) +
+        (inputEmbeddingResp.tokenUsage?.completionDetails?.acceptedPrediction || 0),
+      rejectedPrediction:
+        (tokensUsed.completionDetails?.rejectedPrediction || 0) +
+        (inputEmbeddingResp.tokenUsage?.completionDetails?.rejectedPrediction || 0),
+    };
     return fail(inputEmbeddingResp.error || 'No embedding', tokensUsed);
   }
   const inputEmbedding = inputEmbeddingResp.embedding;
@@ -581,6 +849,18 @@ export async function matchesAnswerRelevance(
     tokensUsed.total += resp.tokenUsage?.total || 0;
     tokensUsed.prompt += resp.tokenUsage?.prompt || 0;
     tokensUsed.completion += resp.tokenUsage?.completion || 0;
+    tokensUsed.cached += resp.tokenUsage?.cached || 0;
+    tokensUsed.completionDetails = {
+      reasoning:
+        (tokensUsed.completionDetails?.reasoning || 0) +
+        (resp.tokenUsage?.completionDetails?.reasoning || 0),
+      acceptedPrediction:
+        (tokensUsed.completionDetails?.acceptedPrediction || 0) +
+        (resp.tokenUsage?.completionDetails?.acceptedPrediction || 0),
+      rejectedPrediction:
+        (tokensUsed.completionDetails?.rejectedPrediction || 0) +
+        (resp.tokenUsage?.completionDetails?.rejectedPrediction || 0),
+    };
     if (resp.error || !resp.embedding) {
       return fail(resp.error || 'No embedding', tokensUsed);
     }
@@ -588,7 +868,7 @@ export async function matchesAnswerRelevance(
   }
 
   const similarity = similarities.reduce((a, b) => a + b, 0) / similarities.length;
-  const pass = similarity >= threshold;
+  const pass = similarity >= threshold - Number.EPSILON;
   const greaterThanReason = `Relevance ${similarity.toFixed(
     2,
   )} is greater than threshold ${threshold}`;
@@ -616,15 +896,14 @@ export async function matchesContextRecall(
   grading?: GradingConfig,
   vars?: Record<string, string | object>,
 ): Promise<Omit<GradingResult, 'assertion'>> {
-  let textProvider = await getAndCheckProvider(
+  const textProvider = await getAndCheckProvider(
     'text',
     grading?.provider,
-    getDefaultProviders().gradingProvider,
+    (await getDefaultProviders()).gradingProvider,
     'context recall check',
   );
 
-  const rubricPrompt = grading?.rubricPrompt || CONTEXT_RECALL;
-  invariant(typeof rubricPrompt === 'string', 'rubricPrompt must be a string');
+  const rubricPrompt = await loadRubricPrompt(grading?.rubricPrompt, CONTEXT_RECALL);
   const promptText = nunjucks.renderString(rubricPrompt, {
     context: JSON.stringify(context).slice(1, -1),
     groundTruth: JSON.stringify(groundTruth).slice(1, -1),
@@ -643,7 +922,7 @@ export async function matchesContextRecall(
     0,
   );
   const score = numerator / sentences.length;
-  const pass = score >= threshold;
+  const pass = score >= threshold - Number.EPSILON;
   return {
     pass,
     score,
@@ -654,6 +933,12 @@ export async function matchesContextRecall(
       total: resp.tokenUsage?.total || 0,
       prompt: resp.tokenUsage?.prompt || 0,
       completion: resp.tokenUsage?.completion || 0,
+      cached: resp.tokenUsage?.cached || 0,
+      completionDetails: resp.tokenUsage?.completionDetails || {
+        reasoning: 0,
+        acceptedPrediction: 0,
+        rejectedPrediction: 0,
+      },
     },
   };
 }
@@ -664,15 +949,14 @@ export async function matchesContextRelevance(
   threshold: number,
   grading?: GradingConfig,
 ): Promise<Omit<GradingResult, 'assertion'>> {
-  let textProvider = await getAndCheckProvider(
+  const textProvider = await getAndCheckProvider(
     'text',
     grading?.provider,
-    getDefaultProviders().gradingProvider,
+    (await getDefaultProviders()).gradingProvider,
     'context relevance check',
   );
 
-  const rubricPrompt = grading?.rubricPrompt || CONTEXT_RELEVANCE;
-  invariant(typeof rubricPrompt === 'string', 'rubricPrompt must be a string');
+  const rubricPrompt = await loadRubricPrompt(grading?.rubricPrompt, CONTEXT_RELEVANCE);
   const promptText = nunjucks.renderString(rubricPrompt, {
     context: JSON.stringify(context).slice(1, -1),
     query: JSON.stringify(question).slice(1, -1),
@@ -690,7 +974,7 @@ export async function matchesContextRelevance(
     0,
   );
   const score = numerator / sentences.length;
-  const pass = score >= threshold;
+  const pass = score >= threshold - Number.EPSILON;
   return {
     pass,
     score,
@@ -701,6 +985,12 @@ export async function matchesContextRelevance(
       total: resp.tokenUsage?.total || 0,
       prompt: resp.tokenUsage?.prompt || 0,
       completion: resp.tokenUsage?.completion || 0,
+      cached: resp.tokenUsage?.cached || 0,
+      completionDetails: resp.tokenUsage?.completionDetails || {
+        reasoning: 0,
+        acceptedPrediction: 0,
+        rejectedPrediction: 0,
+      },
     },
   };
 }
@@ -713,18 +1003,24 @@ export async function matchesContextFaithfulness(
   grading?: GradingConfig,
   vars?: Record<string, string | object>,
 ): Promise<Omit<GradingResult, 'assertion'>> {
-  let textProvider = await getAndCheckProvider(
+  const textProvider = await getAndCheckProvider(
     'text',
     grading?.provider,
-    getDefaultProviders().gradingProvider,
+    (await getDefaultProviders()).gradingProvider,
     'faithfulness check',
   );
 
   if (grading?.rubricPrompt) {
     invariant(Array.isArray(grading.rubricPrompt), 'rubricPrompt must be an array');
   }
-  const longformPrompt = grading?.rubricPrompt?.[0] || CONTEXT_FAITHFULNESS_LONGFORM;
-  const nliPrompt = grading?.rubricPrompt?.[1] || CONTEXT_FAITHFULNESS_NLI_STATEMENTS;
+  const longformPrompt: string =
+    (typeof grading?.rubricPrompt?.[0] === 'string'
+      ? grading?.rubricPrompt?.[0]
+      : grading?.rubricPrompt?.[0].content) || CONTEXT_FAITHFULNESS_LONGFORM;
+  const nliPrompt: string =
+    (typeof grading?.rubricPrompt?.[1] === 'string'
+      ? grading?.rubricPrompt?.[1]
+      : grading?.rubricPrompt?.[1].content) || CONTEXT_FAITHFULNESS_NLI_STATEMENTS;
 
   let promptText = nunjucks.renderString(longformPrompt, {
     question: JSON.stringify(query).slice(1, -1),
@@ -739,7 +1035,7 @@ export async function matchesContextFaithfulness(
 
   invariant(typeof resp.output === 'string', 'context-faithfulness produced malformed response');
 
-  let statements = resp.output.split('\n');
+  const statements = resp.output.split('\n');
   promptText = nunjucks.renderString(nliPrompt, {
     context: JSON.stringify(context).slice(1, -1),
     statements: JSON.stringify(statements.join('\n')).slice(1, -1),
@@ -766,7 +1062,7 @@ export async function matchesContextFaithfulness(
     score = (verdicts.split('verdict: no').length - 1) / statements.length;
   }
   score = 1 - score;
-  let pass = score >= threshold;
+  const pass = score >= threshold - Number.EPSILON;
   return {
     pass,
     score,
@@ -777,6 +1073,12 @@ export async function matchesContextFaithfulness(
       total: resp.tokenUsage?.total || 0,
       prompt: resp.tokenUsage?.prompt || 0,
       completion: resp.tokenUsage?.completion || 0,
+      cached: resp.tokenUsage?.cached || 0,
+      completionDetails: resp.tokenUsage?.completionDetails || {
+        reasoning: 0,
+        acceptedPrediction: 0,
+        rejectedPrediction: 0,
+      },
     },
   };
 }
@@ -791,22 +1093,21 @@ export async function matchesSelectBest(
     outputs.length >= 2,
     'select-best assertion must have at least two outputs to compare between',
   );
-  let textProvider = await getAndCheckProvider(
+  const textProvider = await getAndCheckProvider(
     'text',
     grading?.provider,
-    getDefaultProviders().gradingProvider,
+    (await getDefaultProviders()).gradingProvider,
     'select-best check',
   );
 
-  const rubricPrompt = grading?.rubricPrompt || SELECT_BEST_PROMPT;
-  invariant(typeof rubricPrompt === 'string', 'rubricPrompt must be a string');
-  let promptText = nunjucks.renderString(rubricPrompt, {
+  const rubricPrompt = await loadRubricPrompt(grading?.rubricPrompt, SELECT_BEST_PROMPT);
+  const promptText = nunjucks.renderString(rubricPrompt, {
     criteria: JSON.stringify(criteria).slice(1, -1),
     outputs: outputs.map((output) => JSON.stringify(output).slice(1, -1)),
     ...fromVars(vars),
   });
 
-  let resp = await textProvider.callApi(promptText);
+  const resp = await textProvider.callApi(promptText);
   if (resp.error || !resp.output) {
     return new Array(outputs.length).fill(fail(resp.error || 'No output', resp.tokenUsage));
   }
@@ -814,9 +1115,9 @@ export async function matchesSelectBest(
   invariant(typeof resp.output === 'string', 'select-best produced malformed response');
 
   const firstDigitMatch = resp.output.trim().match(/\d/);
-  const verdict = firstDigitMatch ? parseInt(firstDigitMatch[0], 10) : NaN;
+  const verdict = firstDigitMatch ? Number.parseInt(firstDigitMatch[0], 10) : Number.NaN;
 
-  if (isNaN(verdict) || verdict < 0 || verdict >= outputs.length) {
+  if (Number.isNaN(verdict) || verdict < 0 || verdict >= outputs.length) {
     return new Array(outputs.length).fill(fail(`Invalid select-best verdict: ${verdict}`));
   }
 
@@ -824,6 +1125,12 @@ export async function matchesSelectBest(
     total: resp.tokenUsage?.total || 0,
     prompt: resp.tokenUsage?.prompt || 0,
     completion: resp.tokenUsage?.completion || 0,
+    cached: resp.tokenUsage?.cached || 0,
+    completionDetails: resp.tokenUsage?.completionDetails || {
+      reasoning: 0,
+      acceptedPrediction: 0,
+      rejectedPrediction: 0,
+    },
   };
   return outputs.map((output, index) => {
     if (index === verdict) {
@@ -854,10 +1161,29 @@ export async function matchesModeration(
   { userPrompt, assistantResponse, categories = [] }: ModerationMatchOptions,
   grading?: GradingConfig,
 ) {
+  if (!assistantResponse) {
+    return {
+      pass: true,
+      score: 1,
+      reason: 'No output to moderate',
+    };
+  }
+
+  // Get default providers
+  const defaultProviders = await getDefaultProviders();
+
+  // Only try to use Replicate if OpenAI is not available
+  const hasOpenAiKey = getEnvString('OPENAI_API_KEY');
+  const hasReplicateKey =
+    !hasOpenAiKey && (getEnvString('REPLICATE_API_KEY') || getEnvString('REPLICATE_API_TOKEN'));
+  const defaultModerationProvider = hasReplicateKey
+    ? await loadApiProvider(LLAMA_GUARD_REPLICATE_PROVIDER)
+    : defaultProviders.moderationProvider;
+
   const moderationProvider = (await getAndCheckProvider(
     'moderation',
     grading?.provider,
-    getDefaultProviders().moderationProvider,
+    defaultModerationProvider,
     'moderation check',
   )) as ApiModerationProvider;
 

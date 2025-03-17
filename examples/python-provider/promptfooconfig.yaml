@@ -1,12 +1,16 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
 prompts:
-  - 'Write a tweet about {{topic}}'
-  - 'Write a very concise, funny tweet about {{topic}}'
+  - 'Write a very concise funny tweet about {{topic}}'
 
 providers:
-  - id: python:provider.py # or provider_async.py
-    label: My custom provider
+  - id: file://provider.py # defaults to call_api function
     config:
       someOption: foobar
+
+  - id: file://provider.py:some_other_function
+
+  - id: file://provider.py:async_provider
+    label: async provider
 
 tests:
   - vars:

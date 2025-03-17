@@ -1,10 +1,11 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
 description: 'Moderation example'
 
 prompts:
-  - "Write a tweet about {{topic}}"
+  - 'Write a tweet about {{topic}}'
 
 providers:
-  - openai:gpt-3.5-turbo-0613
+  - openai:gpt-4o-mini
 
 tests:
   - vars:

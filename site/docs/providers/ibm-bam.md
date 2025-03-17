@@ -1,7 +1,3 @@
----
-sidebar_position: 43
----
-
 # IBM BAM
 
 The `bam` provider integrates with IBM's BAM API, allowing access to various models like `meta-llama/llama-2-70b-chat` and `ibm/granite-13b-chat-v2`.
@@ -10,7 +6,7 @@ The `bam` provider integrates with IBM's BAM API, allowing access to various mod
 
 This provider requires you to install the IBM SDK:
 
-```
+```sh
 npm install @ibm-generative-ai/node-sdk
 ```
 
@@ -40,7 +36,7 @@ providers:
 
 To use the BAM provider, you need to set the `BAM_API_KEY` environment variable or specify the `apiKey` directly in the provider configuration. The API key can also be dynamically fetched from an environment variable specified in the `apiKeyEnvar` field in the configuration.
 
-```bash
+```sh
 export BAM_API_KEY='your-bam-api-key'
 ```
 

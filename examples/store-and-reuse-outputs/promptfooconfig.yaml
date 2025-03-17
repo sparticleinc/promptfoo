@@ -1,5 +1,6 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
 prompts:
-  - "Respond to the user: {{message}}"
+  - 'Respond to the user: {{message}}'
 
 providers:
   - openai:gpt-4o
@@ -11,7 +12,7 @@ tests:
       storeOutputAs: favoriteFruit
       transform: output.split(' ')[0]
   - vars:
-      message: "Why do you like {{favoriteFruit}} so much?"
+      message: 'Why do you like {{favoriteFruit}} so much?'
     options:
       storeOutputAs: reason
   - vars:

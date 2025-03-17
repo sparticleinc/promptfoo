@@ -1,7 +1,3 @@
----
-sidebar_position: 41
----
-
 # Ollama
 
 The `ollama` provider is compatible with [Ollama](https://github.com/jmorganca/ollama), which enables access to Llama, Mixtral, Mistral, and more.
@@ -33,6 +29,7 @@ We also support the `/api/embeddings` endpoint via `ollama:embeddings:<model nam
 Supported environment variables:
 
 - `OLLAMA_BASE_URL` - protocol, host name, and port (defaults to `http://localhost:11434`)
+- `OLLAMA_API_KEY` - (optional) api key that is passed as the Bearer token in the Authorization Header when calling the API
 - `REQUEST_TIMEOUT_MS` - request timeout in milliseconds
 
 To pass configuration options to Ollama, use the `config` key like so:
@@ -63,14 +60,22 @@ To investigate and fix this issue, there's a few possible solutions:
 3. Update your OS's [`hosts`](<https://en.wikipedia.org/wiki/Hosts_(file)>) file
    to bind `localhost` to IPv4.
 
-## Evaluating models in serial
+## Evaluating models serially
 
-Many users don't have enough RAM to run all the models. The eval command includes an `--interactive-providers` option that runs evals on only 1 provider at a time:
+By default, promptfoo evaluates all providers concurrently for each prompt. However, you can run evaluations serially using the `-j 1` option:
 
-```sh
-promptfoo eval --interactive-providers
+```bash
+promptfoo eval -j 1
 ```
 
-When you include this argument, the eval will prompt you when it's time to swap out the currently running model:
+This sets concurrency to 1, which means:
 
-![ollama eval model swap](/img/docs/interactive-providers.png)
+1. Evaluations happen one provider at a time, then one prompt at a time.
+2. Only one model is loaded into memory, conserving system resources.
+3. You can easily swap models between evaluations without conflicts.
+
+This approach is particularly useful for:
+
+- Local setups with limited RAM
+- Testing multiple resource-intensive models
+- Debugging provider-specific issues

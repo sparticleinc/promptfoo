@@ -1,12 +1,12 @@
+import { getEnvString } from '../envars';
+
 const langfuseParams = {
-  publicKey: process.env.LANGFUSE_PUBLIC_KEY,
-  secretKey: process.env.LANGFUSE_SECRET_KEY,
-  baseUrl: process.env.LANGFUSE_HOST,
+  publicKey: getEnvString('LANGFUSE_PUBLIC_KEY'),
+  secretKey: getEnvString('LANGFUSE_SECRET_KEY'),
+  baseUrl: getEnvString('LANGFUSE_HOST'),
 };
 
-import { Langfuse } from 'langfuse';
-
-const langfuse = new Langfuse(langfuseParams);
+let langfuse: any;
 
 export async function getPrompt(
   id: string,
@@ -15,6 +15,12 @@ export async function getPrompt(
   version?: number,
 ): Promise<string> {
   let prompt;
+
+  if (!langfuse) {
+    const { Langfuse } = await import('langfuse');
+    langfuse = new Langfuse(langfuseParams);
+  }
+
   if (type === 'text' || type === undefined) {
     prompt = await langfuse.getPrompt(id, version, { type: 'text' });
   } else {

@@ -1,6 +1,6 @@
 To get started:
 
-```
+```sh
 ollama pull llama3
 ollama pull phi3
 ```
@@ -8,6 +8,7 @@ ollama pull phi3
 Next, edit promptfooconfig.yaml.
 
 Then run:
+
 ```
 promptfoo eval
 ```

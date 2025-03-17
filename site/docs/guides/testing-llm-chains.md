@@ -52,7 +52,7 @@ llm_math.run(prompt)
 
 This script is set up so that we can run it like this:
 
-```bash
+```sh
 python langchain_example.py "What is 2+2?"
 ```
 
@@ -61,7 +61,7 @@ Now, let's configure promptfoo to run this LangChain script with a bunch of test
 ```yaml
 prompts: prompt.txt
 providers:
-  - openai:chat:gpt-4-0613
+  - openai:chat:gpt-4o
   - exec:python langchain_example.py
 tests:
   - vars:
@@ -142,9 +142,12 @@ Note that you can always write the logic directly in Javascript if you're comfor
 Now, we can set up a promptfoo config pointing to `chainProvider.js`:
 
 ```yaml
-prompts: [prompt1.txt, prompt2.txt]
+prompts:
+  - file://prompt1.txt
+  - file://prompt2.txt
 // highlight-start
-providers: ['./chainProvider.js']
+providers:
+  - './chainProvider.js'
 // highlight-end
 tests:
   - vars:
@@ -165,4 +168,4 @@ For more detail on testing RAG pipelines, see [RAG evaluations](/docs/guides/eva
 
 ## Other tips
 
-To reference the outputs of previous test cases, use the built-in [`_conversation` variable](/docs/providers/openai#using-the-_conversation-variable).
+To reference the outputs of previous test cases, use the built-in [`_conversation` variable](/docs/configuration/chat#using-the-conversation-variable).

@@ -1,8 +1,8 @@
 ---
-sidebar_position: 51
+sidebar_label: Custom Python
 ---
 
-# Custom Python
+# Python Provider
 
 The `python` provider allows you to use a Python script as an API provider for evaluating prompts. This is useful when you have custom logic or models implemented in Python that you want to integrate with your test suite.
 
@@ -12,18 +12,19 @@ To configure the Python provider, you need to specify the path to your Python sc
 
 ```yaml
 providers:
-  - id: 'python:my_script.py'
-    label: 'Test script 1'   # Optional display label for this provider
+  - id: 'file://my_script.py'
+    label: 'Test script 1' # Optional display label for this provider
     config:
       additionalOption: 123
 ```
 
 ### Python script
 
-Your Python script should accept a prompt, options, and context as arguments. It should return a JSON-encoded `ProviderResponse`.
+Your Python script should implement a function that accepts a prompt, options, and context as arguments. It should return a JSON-encoded `ProviderResponse`.
 
 - The `ProviderResponse` must include an `output` field containing the result of the API call.
 - Optionally, it can include an `error` field if something goes wrong, and a `tokenUsage` field to report the number of tokens used.
+- By default, supported functions are `call_api`, `call_embedding_api`, and `call_classification_api`. To override the function name, specify the script like so: `file://my_script.py:function_name`
 
 Here's an example of a Python script that could be used with the Python provider, which includes handling for the prompt, options, and context:
 
@@ -31,7 +32,13 @@ Here's an example of a Python script that could be used with the Python provider
 # my_script.py
 import json
 
-def call_api(prompt, options, context):
+def call_api(prompt: str, options: Dict[str, Any], context: Dict[str, Any]) -> ProviderResponse:
+    # Note: The prompt may be in JSON format, so you might need to parse it.
+    # For example, if the prompt is a JSON string representing a conversation:
+    # prompt = '[{"role": "user", "content": "Hello, world!"}]'
+    # You would parse it like this:
+    # prompt = json.loads(prompt)
+
     # The 'options' parameter contains additional configuration for the API call.
     config = options.get('config', None)
     additional_option = config.get('additionalOption', None)
@@ -42,8 +49,10 @@ def call_api(prompt, options, context):
     # The prompt is the final prompt string after the variables have been processed.
     # Custom logic to process the prompt goes here.
     # For instance, you might call an external API or run some computations.
+    # TODO: Replace with actual LLM API implementation.
+    def call_llm(prompt):
+        return f"Stub response for prompt: {prompt}"
     output = call_llm(prompt)
-
 
     # The result should be a dictionary with at least an 'output' field.
     result = {
@@ -57,7 +66,19 @@ def call_api(prompt, options, context):
         # If you want to report token usage, you can set the 'tokenUsage' field.
         result['tokenUsage'] = {"total": token_count, "prompt": prompt_token_count, "completion": completion_token_count}
 
+    if failed_guardrails:
+        # If guardrails triggered, you can set the 'guardrails' field.
+        result['guardrails'] = {"flagged": True}
+
     return result
+
+def call_embedding_api(prompt: str) -> ProviderEmbeddingResponse:
+    # Returns ProviderEmbeddingResponse
+    pass
+
+def call_classification_api(prompt: str) -> ProviderClassificationResponse:
+    # Returns ProviderClassificationResponse
+    pass
 ```
 
 ### Types
@@ -84,6 +105,17 @@ class ProviderResponse:
     cost: Optional[float]
     cached: Optional[bool]
     logProbs: Optional[List[float]]
+
+class ProviderEmbeddingResponse:
+    embedding: List[float]
+    tokenUsage: Optional[TokenUsage]
+    cached: Optional[bool]
+
+class ProviderClassificationResponse:
+    classification: Dict[str, Any]
+    tokenUsage: Optional[TokenUsage]
+    cached: Optional[bool]
+
 ```
 
 ### Setting the Python executable
@@ -94,7 +126,7 @@ Here's an example of how you can override the Python executable using the `pytho
 
 ```yaml
 providers:
-  - id: 'python:my_script.py'
+  - id: 'file://my_script.py'
     config:
       pythonExecutable: /path/to/python3.11
 ```

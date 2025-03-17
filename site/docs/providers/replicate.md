@@ -1,7 +1,3 @@
----
-sidebar_position: 99
----
-
 # Replicate
 
 Replicate is an API for machine learning models. It currently hosts models like [Llama v2](https://replicate.com/replicate/llama70b-v2-chat), [Gemma](https://replicate.com/google-deepmind/gemma-7b-it), and [Mistral/Mixtral](https://replicate.com/mistralai/mixtral-8x7b-instruct-v0.1).
@@ -56,7 +52,7 @@ The Replicate provider supports several [configuration options](https://github.c
 | `stop_sequences`     | Specifies stopping sequences that halt the generation.        |
 | `seed`               | Sets a seed for reproducible results.                         |
 
-:::warn
+:::warning
 Not every model supports every completion parameter. Be sure to review the API provided by the model beforehand.
 :::
 
@@ -80,3 +76,44 @@ Supported environment variables:
 - `REPLICATE_SEED` - Sets a seed for reproducible results.
 - `REPLICATE_STOP_SEQUENCES` - Specifies stopping sequences that halt the generation.
 - `REPLICATE_SYSTEM_PROMPT` - Sets a system-level prompt for all requests.
+
+## Images
+
+Image generators such as SDXL can be used like so:
+
+```yaml
+prompts:
+  - 'Generate an image: {{subject}}'
+
+providers:
+  - id: replicate:image:stability-ai/sdxl:7762fd07cf82c948538e41f63f77d685e02b063e37e496e96eefd46c929f9bdc
+    config:
+      width: 768
+      height: 768
+      num_inference_steps: 50
+
+tests:
+  - vars:
+      subject: fruit loops
+```
+
+## Supported Parameters for Images
+
+These parameters are supported for image generation models:
+
+| Parameter             | Description                                                   |
+| --------------------- | ------------------------------------------------------------- |
+| `width`               | The width of the generated image.                             |
+| `height`              | The height of the generated image.                            |
+| `refine`              | Which refine style to use                                     |
+| `apply_watermark`     | Apply a watermark to the generated image.                     |
+| `num_inference_steps` | The number of inference steps to use during image generation. |
+
+:::warning
+Not every model supports every image parameter. Be sure to review the API provided by the model beforehand.
+:::
+
+Supported environment variables for images:
+
+- `REPLICATE_API_TOKEN` - Your Replicate API key.
+- `REPLICATE_API_KEY` - An alternative to `REPLICATE_API_TOKEN` for your API key.

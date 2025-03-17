@@ -1,5 +1,14 @@
-import { getAndCheckProvider, getGradingProvider, matchesClassification } from '../src/matchers';
-import { OpenAiChatCompletionProvider, OpenAiEmbeddingProvider } from '../src/providers/openai';
+import fs from 'fs';
+import path from 'path';
+import { loadFromJavaScriptFile } from '../src/assertions/utils';
+import cliState from '../src/cliState';
+import { importModule } from '../src/esm';
+import {
+  getAndCheckProvider,
+  getGradingProvider,
+  matchesClassification,
+  matchesModeration,
+} from '../src/matchers';
 import {
   matchesSimilarity,
   matchesLlmRubric,
@@ -10,20 +19,53 @@ import {
   matchesContextRecall,
   matchesContextFaithfulness,
 } from '../src/matchers';
-import { DefaultEmbeddingProvider, DefaultGradingProvider } from '../src/providers/openai';
-
-import { TestGrader } from './assertions.test';
-
+import { ANSWER_RELEVANCY_GENERATE, CONTEXT_RECALL, CONTEXT_RELEVANCE } from '../src/prompts';
+import { HuggingfaceTextClassificationProvider } from '../src/providers/huggingface';
+import { OpenAiChatCompletionProvider } from '../src/providers/openai/chat';
+import { DefaultEmbeddingProvider, DefaultGradingProvider } from '../src/providers/openai/defaults';
+import { OpenAiEmbeddingProvider } from '../src/providers/openai/embedding';
+import { OpenAiModerationProvider } from '../src/providers/openai/moderation';
+import { ReplicateModerationProvider } from '../src/providers/replicate';
+import { LLAMA_GUARD_REPLICATE_PROVIDER } from '../src/redteam/constants';
+import * as remoteGrading from '../src/remoteGrading';
 import type {
-  GradingConfig,
-  ProviderResponse,
-  ProviderClassificationResponse,
   ApiProvider,
+  Assertion,
+  GradingConfig,
+  ProviderClassificationResponse,
+  ProviderResponse,
   ProviderTypeMap,
 } from '../src/types';
-import { HuggingfaceTextClassificationProvider } from '../src/providers/huggingface';
+import { TestGrader } from './util/utils';
 
+jest.mock('../src/database', () => ({
+  getDb: jest.fn().mockImplementation(() => {
+    throw new TypeError('The "original" argument must be of type function. Received undefined');
+  }),
+}));
 jest.mock('../src/esm');
+jest.mock('../src/cliState');
+jest.mock('../src/remoteGrading', () => ({
+  doRemoteGrading: jest.fn(),
+}));
+jest.mock('../src/redteam/remoteGeneration', () => ({
+  shouldGenerateRemote: jest.fn().mockReturnValue(true),
+}));
+jest.mock('proxy-agent', () => ({
+  ProxyAgent: jest.fn().mockImplementation(() => ({})),
+}));
+jest.mock('glob', () => ({
+  globSync: jest.fn(),
+}));
+jest.mock('better-sqlite3');
+jest.mock('fs', () => ({
+  ...jest.requireActual('fs'),
+  readFileSync: jest.fn(),
+  existsSync: jest.fn(),
+}));
+jest.mock('../src/esm', () => ({
+  importModule: jest.fn(),
+}));
 
 const Grader = new TestGrader();
 
@@ -54,9 +96,18 @@ describe('matchesSimilarity', () => {
     const output = 'Sample output';
     const threshold = 0.5;
 
-    const result = await matchesSimilarity(expected, output, threshold);
-    expect(result.pass).toBeTruthy();
-    expect(result.reason).toBe('Similarity 1.00 is greater than threshold 0.5');
+    await expect(matchesSimilarity(expected, output, threshold)).resolves.toEqual({
+      pass: true,
+      reason: 'Similarity 1.00 is greater than threshold 0.5',
+      score: 1,
+      tokensUsed: {
+        total: expect.any(Number),
+        prompt: expect.any(Number),
+        completion: expect.any(Number),
+        cached: expect.any(Number),
+        completionDetails: expect.any(Object),
+      },
+    });
   });
 
   it('should fail when similarity is below the threshold', async () => {
@@ -64,9 +115,18 @@ describe('matchesSimilarity', () => {
     const output = 'Different output';
     const threshold = 0.9;
 
-    const result = await matchesSimilarity(expected, output, threshold);
-    expect(result.pass).toBeFalsy();
-    expect(result.reason).toBe('Similarity 0.00 is less than threshold 0.9');
+    await expect(matchesSimilarity(expected, output, threshold)).resolves.toEqual({
+      pass: false,
+      reason: 'Similarity 0.00 is less than threshold 0.9',
+      score: 0,
+      tokensUsed: {
+        total: expect.any(Number),
+        prompt: expect.any(Number),
+        completion: expect.any(Number),
+        cached: expect.any(Number),
+        completionDetails: expect.any(Object),
+      },
+    });
   });
 
   it('should fail when inverted similarity is above the threshold', async () => {
@@ -74,9 +134,20 @@ describe('matchesSimilarity', () => {
     const output = 'Sample output';
     const threshold = 0.5;
 
-    const result = await matchesSimilarity(expected, output, threshold, true /* invert */);
-    expect(result.pass).toBeFalsy();
-    expect(result.reason).toBe('Similarity 1.00 is greater than threshold 0.5');
+    await expect(
+      matchesSimilarity(expected, output, threshold, true /* invert */),
+    ).resolves.toEqual({
+      pass: false,
+      reason: 'Similarity 1.00 is greater than threshold 0.5',
+      score: 0,
+      tokensUsed: {
+        total: expect.any(Number),
+        prompt: expect.any(Number),
+        completion: expect.any(Number),
+        cached: expect.any(Number),
+        completionDetails: expect.any(Object),
+      },
+    });
   });
 
   it('should pass when inverted similarity is below the threshold', async () => {
@@ -84,12 +155,23 @@ describe('matchesSimilarity', () => {
     const output = 'Different output';
     const threshold = 0.9;
 
-    const result = await matchesSimilarity(expected, output, threshold, true /* invert */);
-    expect(result.pass).toBeTruthy();
-    expect(result.reason).toBe('Similarity 0.00 is less than threshold 0.9');
+    await expect(
+      matchesSimilarity(expected, output, threshold, true /* invert */),
+    ).resolves.toEqual({
+      pass: true,
+      reason: 'Similarity 0.00 is less than threshold 0.9',
+      score: 1,
+      tokensUsed: {
+        total: expect.any(Number),
+        prompt: expect.any(Number),
+        completion: expect.any(Number),
+        cached: expect.any(Number),
+        completionDetails: expect.any(Object),
+      },
+    });
   });
 
-  it('should use the overridden simmilarity grading config', async () => {
+  it('should use the overridden similarity grading config', async () => {
     const expected = 'Expected output';
     const output = 'Sample output';
     const threshold = 0.5;
@@ -113,10 +195,19 @@ describe('matchesSimilarity', () => {
       });
     });
 
-    const result = await matchesSimilarity(expected, output, threshold, false, grading);
-    expect(result.pass).toBeTruthy();
-    expect(result.reason).toBe('Similarity 1.00 is greater than threshold 0.5');
-    expect(mockCallApi).toHaveBeenCalled();
+    await expect(matchesSimilarity(expected, output, threshold, false, grading)).resolves.toEqual({
+      pass: true,
+      reason: 'Similarity 1.00 is greater than threshold 0.5',
+      score: 1,
+      tokensUsed: {
+        total: expect.any(Number),
+        prompt: expect.any(Number),
+        completion: expect.any(Number),
+        cached: expect.any(Number),
+        completionDetails: expect.any(Object),
+      },
+    });
+    expect(mockCallApi).toHaveBeenCalledWith('Expected output');
 
     mockCallApi.mockRestore();
   });
@@ -143,9 +234,40 @@ describe('matchesSimilarity', () => {
       await matchesSimilarity(expected, output, threshold, false, grading);
     }).rejects.toThrow('API call failed');
   });
+
+  it('should use Nunjucks templating when PROMPTFOO_DISABLE_TEMPLATING is set', async () => {
+    process.env.PROMPTFOO_DISABLE_TEMPLATING = 'true';
+    const expected = 'Expected {{ var }}';
+    const output = 'Output {{ var }}';
+    const threshold = 0.8;
+    const grading: GradingConfig = {
+      provider: DefaultEmbeddingProvider,
+    };
+
+    jest.spyOn(DefaultEmbeddingProvider, 'callEmbeddingApi').mockResolvedValue({
+      embedding: [1, 2, 3],
+      tokenUsage: { total: 10, prompt: 5, completion: 5 },
+    });
+
+    await matchesSimilarity(expected, output, threshold, false, grading);
+
+    expect(DefaultEmbeddingProvider.callEmbeddingApi).toHaveBeenCalledWith('Expected {{ var }}');
+    expect(DefaultEmbeddingProvider.callEmbeddingApi).toHaveBeenCalledWith('Output {{ var }}');
+
+    process.env.PROMPTFOO_DISABLE_TEMPLATING = undefined;
+  });
 });
 
 describe('matchesLlmRubric', () => {
+  const mockFilePath = path.join('path', 'to', 'external', 'rubric.txt');
+  const mockFileContent = 'This is an external rubric prompt';
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.mocked(fs.existsSync).mockReturnValue(true);
+    jest.mocked(fs.readFileSync).mockReturnValue(mockFileContent);
+  });
+
   it('should pass when the grading provider returns a passing result', async () => {
     const expected = 'Expected output';
     const output = 'Sample output';
@@ -154,8 +276,18 @@ describe('matchesLlmRubric', () => {
       provider: Grader,
     };
 
-    const result = await matchesLlmRubric(expected, output, options);
-    expect(result.pass).toBeTruthy();
+    await expect(matchesLlmRubric(expected, output, options)).resolves.toEqual({
+      pass: true,
+      reason: 'Test grading output',
+      score: 1,
+      tokensUsed: {
+        total: expect.any(Number),
+        prompt: expect.any(Number),
+        completion: expect.any(Number),
+        cached: expect.any(Number),
+        completionDetails: expect.any(Object),
+      },
+    });
   });
 
   it('should fail when the grading provider returns a failing result', async () => {
@@ -171,9 +303,18 @@ describe('matchesLlmRubric', () => {
       tokenUsage: { total: 10, prompt: 5, completion: 5 },
     });
 
-    const result = await matchesLlmRubric(expected, output, options);
-    expect(result.pass).toBeFalsy();
-    expect(result.reason).toBe('Grading failed');
+    await expect(matchesLlmRubric(expected, output, options)).resolves.toEqual({
+      pass: false,
+      reason: 'Grading failed',
+      score: 0,
+      tokensUsed: {
+        total: expect.any(Number),
+        prompt: expect.any(Number),
+        completion: expect.any(Number),
+        cached: expect.any(Number),
+        completionDetails: expect.any(Object),
+      },
+    });
   });
 
   it('should use the overridden llm rubric grading config', async () => {
@@ -182,7 +323,7 @@ describe('matchesLlmRubric', () => {
     const options: GradingConfig = {
       rubricPrompt: 'Grading prompt',
       provider: {
-        id: 'openai:gpt-3.5-turbo',
+        id: 'openai:gpt-4o-mini',
         config: {
           apiKey: 'abc123',
           temperature: 3.1415926,
@@ -200,12 +341,500 @@ describe('matchesLlmRubric', () => {
       });
     });
 
-    const result = await matchesLlmRubric(expected, output, options);
-    expect(result.reason).toBe('Grading passed');
-    expect(result.pass).toBeTruthy();
-    expect(mockCallApi).toHaveBeenCalled();
+    await expect(matchesLlmRubric(expected, output, options)).resolves.toEqual({
+      reason: 'Grading passed',
+      pass: true,
+      score: 1,
+      tokensUsed: {
+        total: expect.any(Number),
+        prompt: expect.any(Number),
+        completion: expect.any(Number),
+        cached: expect.any(Number),
+        completionDetails: expect.any(Object),
+      },
+    });
+    expect(mockCallApi).toHaveBeenCalledWith('Grading prompt');
 
     mockCallApi.mockRestore();
+  });
+
+  it('should use provided score threshold if llm does not return pass', async () => {
+    const rubricPrompt = 'Rubric prompt';
+    const llmOutput = 'Sample output';
+    const assertion: Assertion = {
+      type: 'llm-rubric',
+      value: rubricPrompt,
+      threshold: 0.5,
+    };
+
+    const lowScoreResponse = { score: 0.25, reason: 'Low score' };
+    const lowScoreProvider: ApiProvider = {
+      id: () => 'test-provider',
+      callApi: jest.fn().mockResolvedValue({
+        output: JSON.stringify(lowScoreResponse),
+      }),
+    };
+
+    await expect(
+      matchesLlmRubric(
+        rubricPrompt,
+        llmOutput,
+        { rubricPrompt, provider: lowScoreProvider },
+        {},
+        assertion,
+      ),
+    ).resolves.toEqual(expect.objectContaining({ assertion, pass: false, ...lowScoreResponse }));
+
+    const highScoreResponse = { score: 0.75, reason: 'High score' };
+    const highScoreProvider: ApiProvider = {
+      id: () => 'test-provider',
+      callApi: jest.fn().mockResolvedValue({
+        output: JSON.stringify(highScoreResponse),
+      }),
+    };
+    await expect(
+      matchesLlmRubric(
+        rubricPrompt,
+        llmOutput,
+        { rubricPrompt, provider: highScoreProvider },
+        {},
+        assertion,
+      ),
+    ).resolves.toEqual(expect.objectContaining({ assertion, pass: true, ...highScoreResponse }));
+  });
+
+  it('should ignore the score threshold if llm returns pass', async () => {
+    const rubricPrompt = 'Rubric prompt';
+    const output = 'Sample output';
+    const assertion: Assertion = {
+      type: 'llm-rubric',
+      value: rubricPrompt,
+      threshold: 0.1,
+    };
+
+    const lowScoreResult = { score: 0.25, reason: 'Low score but pass', pass: true };
+    const lowScoreOptions: GradingConfig = {
+      rubricPrompt,
+      provider: {
+        id: () => 'test-provider',
+        callApi: jest.fn().mockResolvedValue({
+          output: JSON.stringify(lowScoreResult),
+        }),
+      },
+    };
+
+    await expect(
+      matchesLlmRubric(rubricPrompt, output, lowScoreOptions, {}, assertion),
+    ).resolves.toEqual(expect.objectContaining({ assertion, ...lowScoreResult }));
+  });
+
+  it('should respect both threshold and explicit pass/fail when both are present', async () => {
+    const rubricPrompt = 'Rubric prompt';
+    const output = 'Sample output';
+    const assertion: Assertion = {
+      type: 'llm-rubric',
+      value: rubricPrompt,
+      threshold: 0.8,
+    };
+
+    // Case 1: Pass is true but score is below threshold
+    const failingResult = { score: 0.7, reason: 'Score below threshold', pass: true };
+    const failingOptions: GradingConfig = {
+      rubricPrompt,
+      provider: {
+        id: () => 'test-provider',
+        callApi: jest.fn().mockResolvedValue({
+          output: JSON.stringify(failingResult),
+        }),
+      },
+    };
+
+    await expect(
+      matchesLlmRubric(rubricPrompt, output, failingOptions, {}, assertion),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        assertion,
+        score: 0.7,
+        pass: false,
+        reason: 'Score below threshold',
+      }),
+    );
+
+    // Case 2: Pass is false but score is above threshold
+    const passingResult = {
+      score: 0.9,
+      reason: 'Score above threshold but explicit fail',
+      pass: false,
+    };
+    const passingOptions: GradingConfig = {
+      rubricPrompt,
+      provider: {
+        id: () => 'test-provider',
+        callApi: jest.fn().mockResolvedValue({
+          output: JSON.stringify(passingResult),
+        }),
+      },
+    };
+
+    await expect(
+      matchesLlmRubric(rubricPrompt, output, passingOptions, {}, assertion),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        assertion,
+        score: 0.9,
+        pass: false,
+        reason: 'Score above threshold but explicit fail',
+      }),
+    );
+  });
+
+  it('should handle edge cases around threshold value', async () => {
+    const rubricPrompt = 'Rubric prompt';
+    const output = 'Sample output';
+    const assertion: Assertion = {
+      type: 'llm-rubric',
+      value: rubricPrompt,
+      threshold: 0.8,
+    };
+
+    // Exactly at threshold should pass
+    const exactThresholdResult = { score: 0.8, reason: 'Exactly at threshold' };
+    const exactOptions: GradingConfig = {
+      rubricPrompt,
+      provider: {
+        id: () => 'test-provider',
+        callApi: jest.fn().mockResolvedValue({
+          output: JSON.stringify(exactThresholdResult),
+        }),
+      },
+    };
+
+    await expect(
+      matchesLlmRubric(rubricPrompt, output, exactOptions, {}, assertion),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        assertion,
+        score: 0.8,
+        pass: true,
+        reason: 'Exactly at threshold',
+      }),
+    );
+
+    // Just below threshold should fail
+    const justBelowResult = { score: 0.799, reason: 'Just below threshold' };
+    const belowOptions: GradingConfig = {
+      rubricPrompt,
+      provider: {
+        id: () => 'test-provider',
+        callApi: jest.fn().mockResolvedValue({
+          output: JSON.stringify(justBelowResult),
+        }),
+      },
+    };
+
+    await expect(
+      matchesLlmRubric(rubricPrompt, output, belowOptions, {}, assertion),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        assertion,
+        score: 0.799,
+        pass: false,
+        reason: 'Just below threshold',
+      }),
+    );
+  });
+
+  it('should handle missing or invalid scores when threshold is present', async () => {
+    const rubricPrompt = 'Rubric prompt';
+    const output = 'Sample output';
+    const assertion: Assertion = {
+      type: 'llm-rubric',
+      value: rubricPrompt,
+      threshold: 0.8,
+    };
+
+    // Missing score should default to pass value
+    const missingScoreResult = { pass: true, reason: 'No score provided' };
+    const missingScoreOptions: GradingConfig = {
+      rubricPrompt,
+      provider: {
+        id: () => 'test-provider',
+        callApi: jest.fn().mockResolvedValue({
+          output: JSON.stringify(missingScoreResult),
+        }),
+      },
+    };
+
+    await expect(
+      matchesLlmRubric(rubricPrompt, output, missingScoreOptions, {}, assertion),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        assertion,
+        score: 1.0,
+        pass: true,
+        reason: 'No score provided',
+      }),
+    );
+
+    // Invalid score type should be handled gracefully
+    const invalidScoreResult = { score: 'high', reason: 'Invalid score type', pass: true };
+    const invalidScoreOptions: GradingConfig = {
+      rubricPrompt,
+      provider: {
+        id: () => 'test-provider',
+        callApi: jest.fn().mockResolvedValue({
+          output: JSON.stringify(invalidScoreResult),
+        }),
+      },
+    };
+
+    await expect(
+      matchesLlmRubric(rubricPrompt, output, invalidScoreOptions, {}, assertion),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        assertion,
+        score: 1.0,
+        pass: true,
+        reason: 'Invalid score type',
+      }),
+    );
+  });
+
+  it('should handle string scores', async () => {
+    const rubricPrompt = 'Rubric prompt';
+    const output = 'Sample output';
+    const assertion: Assertion = {
+      type: 'llm-rubric',
+      value: rubricPrompt,
+      threshold: 0.8,
+    };
+
+    const stringScoreResult = { score: '0.9', reason: 'String score' };
+    const stringScoreOptions: GradingConfig = {
+      rubricPrompt,
+      provider: {
+        id: () => 'test-provider',
+        callApi: jest.fn().mockResolvedValue({
+          output: JSON.stringify(stringScoreResult),
+        }),
+      },
+    };
+
+    await expect(
+      matchesLlmRubric(rubricPrompt, output, stringScoreOptions, {}, assertion),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        assertion,
+        score: 0.9,
+        pass: true,
+        reason: 'String score',
+      }),
+    );
+  });
+
+  it('should handle string pass values', async () => {
+    const rubricPrompt = 'Rubric prompt';
+    const output = 'Sample output';
+    const assertion: Assertion = {
+      type: 'llm-rubric',
+      value: rubricPrompt,
+      threshold: 0.8,
+    };
+
+    const stringPassResult = { reason: 'String pass', pass: 'true' };
+    const stringPassOptions: GradingConfig = {
+      rubricPrompt,
+      provider: {
+        id: () => 'test-provider',
+        callApi: jest.fn().mockResolvedValue({
+          output: JSON.stringify(stringPassResult),
+        }),
+      },
+    };
+
+    await expect(
+      matchesLlmRubric(rubricPrompt, output, stringPassOptions, {}, assertion),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        assertion,
+        pass: true,
+        reason: 'String pass',
+      }),
+    );
+
+    const stringFailResult = { reason: 'String fail', pass: 'false' };
+    const stringFailOptions: GradingConfig = {
+      rubricPrompt,
+      provider: {
+        id: () => 'test-provider',
+        callApi: jest.fn().mockResolvedValue({
+          output: JSON.stringify(stringFailResult),
+        }),
+      },
+    };
+
+    await expect(
+      matchesLlmRubric(rubricPrompt, output, stringFailOptions, {}, assertion),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        assertion,
+        pass: false,
+        reason: 'String fail',
+      }),
+    );
+  });
+
+  it('should load rubric prompt from external file when specified', async () => {
+    const rubric = 'Test rubric';
+    const llmOutput = 'Test output';
+    const grading = {
+      rubricPrompt: `file://${mockFilePath}`,
+      provider: {
+        id: () => 'test-provider',
+        callApi: jest.fn().mockResolvedValue({
+          output: JSON.stringify({ pass: true, score: 1, reason: 'Test passed' }),
+          tokenUsage: { total: 10, prompt: 5, completion: 5 },
+        }),
+      },
+    };
+
+    const result = await matchesLlmRubric(rubric, llmOutput, grading);
+
+    expect(fs.existsSync).toHaveBeenCalledWith(
+      expect.stringContaining(path.join('path', 'to', 'external', 'rubric.txt')),
+    );
+    expect(fs.readFileSync).toHaveBeenCalledWith(
+      expect.stringContaining(path.join('path', 'to', 'external', 'rubric.txt')),
+      'utf8',
+    );
+    expect(grading.provider.callApi).toHaveBeenCalledWith(expect.stringContaining(mockFileContent));
+    expect(result).toEqual({
+      pass: true,
+      score: 1,
+      reason: 'Test passed',
+      tokensUsed: {
+        total: 10,
+        prompt: 5,
+        completion: 5,
+        cached: 0,
+        completionDetails: { reasoning: 0, acceptedPrediction: 0, rejectedPrediction: 0 },
+      },
+    });
+  });
+
+  it('should load rubric prompt from js file when specified', async () => {
+    const filePath = path.join('path', 'to', 'external', 'file.js');
+    const mockImportModule = jest.mocked(importModule);
+    const mockFunction = jest.fn(() => 'Do this: {{ rubric }}');
+    mockImportModule.mockResolvedValue(mockFunction);
+
+    const rubric = 'Test rubric';
+    const llmOutput = 'Test output';
+    const grading = {
+      rubricPrompt: `file://${filePath}`,
+      provider: {
+        id: () => 'test-provider',
+        callApi: jest.fn().mockResolvedValue({
+          output: JSON.stringify({ pass: true, score: 1, reason: 'Test passed' }),
+        }),
+      },
+    };
+
+    const result = await matchesLlmRubric(rubric, llmOutput, grading);
+
+    await expect(loadFromJavaScriptFile(filePath, undefined, [])).resolves.toBe(
+      'Do this: {{ rubric }}',
+    );
+
+    expect(grading.provider.callApi).toHaveBeenCalledWith(
+      expect.stringContaining('Do this: Test rubric'),
+    );
+    expect(mockImportModule).toHaveBeenCalledWith(filePath, undefined);
+
+    expect(result).toEqual(
+      expect.objectContaining({ pass: true, score: 1, reason: 'Test passed' }),
+    );
+  });
+
+  it('should throw an error when the external file is not found', async () => {
+    jest.mocked(fs.existsSync).mockReturnValue(false);
+
+    const rubric = 'Test rubric';
+    const llmOutput = 'Test output';
+    const grading = {
+      rubricPrompt: `file://${mockFilePath}`,
+      provider: {
+        id: () => 'test-provider',
+        callApi: jest.fn().mockResolvedValue({
+          output: JSON.stringify({ pass: true, score: 1, reason: 'Test passed' }),
+          tokenUsage: { total: 10, prompt: 5, completion: 5 },
+        }),
+      },
+    };
+
+    await expect(matchesLlmRubric(rubric, llmOutput, grading)).rejects.toThrow(
+      'File does not exist',
+    );
+
+    expect(fs.existsSync).toHaveBeenCalledWith(
+      expect.stringContaining(path.join('path', 'to', 'external', 'rubric.txt')),
+    );
+    expect(fs.readFileSync).not.toHaveBeenCalled();
+    expect(grading.provider.callApi).not.toHaveBeenCalled();
+  });
+
+  it('should not call remote when rubric prompt is overridden, even if redteam is enabled', async () => {
+    const rubric = 'Test rubric';
+    const llmOutput = 'Test output';
+    const grading = {
+      rubricPrompt: 'Custom prompt',
+      provider: {
+        id: () => 'test-provider',
+        callApi: jest.fn().mockResolvedValue({
+          output: JSON.stringify({ pass: true, score: 1, reason: 'Test passed' }),
+          tokenUsage: { total: 10, prompt: 5, completion: 5 },
+        }),
+      },
+    };
+
+    // Give it a redteam config
+    cliState.config = { redteam: {} };
+
+    await matchesLlmRubric(rubric, llmOutput, grading);
+
+    const { doRemoteGrading } = remoteGrading;
+    expect(doRemoteGrading).not.toHaveBeenCalled();
+
+    expect(grading.provider.callApi).toHaveBeenCalledWith(expect.stringContaining('Custom prompt'));
+  });
+
+  it('should call remote when redteam is enabled and rubric prompt is not overridden', async () => {
+    const rubric = 'Test rubric';
+    const llmOutput = 'Test output';
+    const grading = {
+      provider: {
+        id: () => 'test-provider',
+        callApi: jest.fn().mockResolvedValue({
+          output: JSON.stringify({ pass: true, score: 1, reason: 'Test passed' }),
+          tokenUsage: { total: 10, prompt: 5, completion: 5 },
+        }),
+      },
+    };
+
+    // Give it a redteam config
+    cliState.config = { redteam: {} };
+
+    await matchesLlmRubric(rubric, llmOutput, grading);
+
+    const { doRemoteGrading } = remoteGrading;
+    expect(doRemoteGrading).toHaveBeenCalledWith({
+      task: 'llm-rubric',
+      rubric,
+      output: llmOutput,
+      vars: {},
+    });
+
+    expect(grading.provider.callApi).not.toHaveBeenCalled();
   });
 });
 
@@ -222,11 +851,19 @@ describe('matchesFactuality', () => {
       tokenUsage: { total: 10, prompt: 5, completion: 5 },
     });
 
-    const result = await matchesFactuality(input, expected, output, grading);
-    expect(result.pass).toBeTruthy();
-    expect(result.reason).toBe(
-      'The submitted answer is a subset of the expert answer and is fully consistent with it.',
-    );
+    await expect(matchesFactuality(input, expected, output, grading)).resolves.toEqual({
+      pass: true,
+      reason:
+        'The submitted answer is a subset of the expert answer and is fully consistent with it.',
+      score: 1,
+      tokensUsed: {
+        total: expect.any(Number),
+        prompt: expect.any(Number),
+        completion: expect.any(Number),
+        cached: expect.any(Number),
+        completionDetails: expect.any(Object),
+      },
+    });
   });
 
   it('should fail when the factuality check fails', async () => {
@@ -239,11 +876,18 @@ describe('matchesFactuality', () => {
       tokenUsage: { total: 10, prompt: 5, completion: 5 },
     });
 
-    const result = await matchesFactuality(input, expected, output, grading);
-    expect(result.pass).toBeFalsy();
-    expect(result.reason).toBe(
-      'There is a disagreement between the submitted answer and the expert answer.',
-    );
+    await expect(matchesFactuality(input, expected, output, grading)).resolves.toEqual({
+      pass: false,
+      reason: 'There is a disagreement between the submitted answer and the expert answer.',
+      score: 0,
+      tokensUsed: {
+        total: expect.any(Number),
+        prompt: expect.any(Number),
+        completion: expect.any(Number),
+        cached: expect.any(Number),
+        completionDetails: expect.any(Object),
+      },
+    });
   });
 
   it('should use the overridden factuality grading config', async () => {
@@ -266,12 +910,19 @@ describe('matchesFactuality', () => {
       tokenUsage: { total: 10, prompt: 5, completion: 5 },
     });
 
-    const result = await matchesFactuality(input, expected, output, grading);
-    expect(result.score).toBe(0.8);
-    expect(result.pass).toBeTruthy();
-    expect(result.reason).toBe(
-      'The submitted answer is a subset of the expert answer and is fully consistent with it.',
-    );
+    await expect(matchesFactuality(input, expected, output, grading)).resolves.toEqual({
+      pass: true,
+      reason:
+        'The submitted answer is a subset of the expert answer and is fully consistent with it.',
+      score: 0.8,
+      tokensUsed: {
+        total: expect.any(Number),
+        prompt: expect.any(Number),
+        completion: expect.any(Number),
+        cached: expect.any(Number),
+        completionDetails: expect.any(Object),
+      },
+    });
   });
 
   it('should throw an error when an error occurs', async () => {
@@ -288,6 +939,35 @@ describe('matchesFactuality', () => {
       'An error occurred',
     );
   });
+
+  it('should use Nunjucks templating when PROMPTFOO_DISABLE_TEMPLATING is set', async () => {
+    process.env.PROMPTFOO_DISABLE_TEMPLATING = 'true';
+    const input = 'Input {{ var }}';
+    const expected = 'Expected {{ var }}';
+    const output = 'Output {{ var }}';
+    const grading: GradingConfig = {
+      provider: DefaultGradingProvider,
+    };
+
+    jest.spyOn(DefaultGradingProvider, 'callApi').mockResolvedValue({
+      output: '(A) The submitted answer is correct.',
+      tokenUsage: { total: 10, prompt: 5, completion: 5 },
+    });
+
+    await matchesFactuality(input, expected, output, grading);
+
+    expect(DefaultGradingProvider.callApi).toHaveBeenCalledWith(
+      expect.stringContaining('Input {{ var }}'),
+    );
+    expect(DefaultGradingProvider.callApi).toHaveBeenCalledWith(
+      expect.stringContaining('Expected {{ var }}'),
+    );
+    expect(DefaultGradingProvider.callApi).toHaveBeenCalledWith(
+      expect.stringContaining('Output {{ var }}'),
+    );
+
+    process.env.PROMPTFOO_DISABLE_TEMPLATING = undefined;
+  });
 });
 
 describe('matchesClosedQa', () => {
@@ -298,13 +978,22 @@ describe('matchesClosedQa', () => {
     const grading = {};
 
     jest.spyOn(DefaultGradingProvider, 'callApi').mockResolvedValueOnce({
-      output: 'foo \n \n bar\n Y Y',
+      output: 'foo \n \n bar\n Y Y \n',
       tokenUsage: { total: 10, prompt: 5, completion: 5 },
     });
 
-    const result = await matchesClosedQa(input, expected, output, grading);
-    expect(result.pass).toBeTruthy();
-    expect(result.reason).toBe('The submission meets the criterion');
+    await expect(matchesClosedQa(input, expected, output, grading)).resolves.toEqual({
+      pass: true,
+      reason: 'The submission meets the criterion',
+      score: 1,
+      tokensUsed: {
+        total: expect.any(Number),
+        prompt: expect.any(Number),
+        completion: expect.any(Number),
+        cached: expect.any(Number),
+        completionDetails: expect.any(Object),
+      },
+    });
   });
 
   it('should fail when the closed QA check fails', async () => {
@@ -314,13 +1003,22 @@ describe('matchesClosedQa', () => {
     const grading = {};
 
     jest.spyOn(DefaultGradingProvider, 'callApi').mockResolvedValueOnce({
-      output: 'foo bar N',
+      output: 'foo bar N \n',
       tokenUsage: { total: 10, prompt: 5, completion: 5 },
     });
 
-    const result = await matchesClosedQa(input, expected, output, grading);
-    expect(result.pass).toBeFalsy();
-    expect(result.reason).toBe('The submission does not meet the criterion:\nfoo bar N');
+    await expect(matchesClosedQa(input, expected, output, grading)).resolves.toEqual({
+      pass: false,
+      reason: 'The submission does not meet the criterion:\nfoo bar N \n',
+      score: 0,
+      tokensUsed: {
+        total: expect.any(Number),
+        prompt: expect.any(Number),
+        completion: expect.any(Number),
+        cached: expect.any(Number),
+        completionDetails: expect.any(Object),
+      },
+    });
   });
 
   it('should throw an error when an error occurs', async () => {
@@ -349,7 +1047,7 @@ describe('matchesClosedQa', () => {
       try {
         JSON.parse(prompt);
         isJson = true;
-      } catch (err) {
+      } catch {
         isJson = false;
       }
       return Promise.resolve({
@@ -357,11 +1055,48 @@ describe('matchesClosedQa', () => {
         tokenUsage: { total: 10, prompt: 5, completion: 5 },
       });
     });
-
-    const result = await matchesClosedQa(input, expected, output, grading);
+    await expect(matchesClosedQa(input, expected, output, grading)).resolves.toEqual({
+      pass: true,
+      reason: 'The submission meets the criterion',
+      score: 1,
+      tokensUsed: {
+        total: expect.any(Number),
+        prompt: expect.any(Number),
+        completion: expect.any(Number),
+        cached: expect.any(Number),
+        completionDetails: expect.any(Object),
+      },
+    });
     expect(isJson).toBeTruthy();
-    expect(result.pass).toBeTruthy();
-    expect(result.reason).toBe('The submission meets the criterion');
+  });
+
+  it('should use Nunjucks templating when PROMPTFOO_DISABLE_TEMPLATING is set', async () => {
+    process.env.PROMPTFOO_DISABLE_TEMPLATING = 'true';
+    const input = 'Input {{ var }}';
+    const expected = 'Expected {{ var }}';
+    const output = 'Output {{ var }}';
+    const grading: GradingConfig = {
+      provider: DefaultGradingProvider,
+    };
+
+    jest.spyOn(DefaultGradingProvider, 'callApi').mockResolvedValue({
+      output: 'Y',
+      tokenUsage: { total: 10, prompt: 5, completion: 5 },
+    });
+
+    await matchesClosedQa(input, expected, output, grading);
+
+    expect(DefaultGradingProvider.callApi).toHaveBeenCalledWith(
+      expect.stringContaining('Input {{ var }}'),
+    );
+    expect(DefaultGradingProvider.callApi).toHaveBeenCalledWith(
+      expect.stringContaining('Expected {{ var }}'),
+    );
+    expect(DefaultGradingProvider.callApi).toHaveBeenCalledWith(
+      expect.stringContaining('Output {{ var }}'),
+    );
+
+    process.env.PROMPTFOO_DISABLE_TEMPLATING = undefined;
   });
 });
 
@@ -369,11 +1104,11 @@ describe('getGradingProvider', () => {
   it('should return the correct provider when provider is a string', async () => {
     const provider = await getGradingProvider(
       'text',
-      'openai:chat:gpt-3.5-turbo-foobar',
+      'openai:chat:gpt-4o-mini-foobar',
       DefaultGradingProvider,
     );
     // ok for this not to match exactly when the string is parsed
-    expect(provider?.id()).toBe('openai:gpt-3.5-turbo-foobar');
+    expect(provider?.id()).toBe('openai:gpt-4o-mini-foobar');
   });
 
   it('should return the correct provider when provider is an ApiProvider', async () => {
@@ -387,14 +1122,14 @@ describe('getGradingProvider', () => {
 
   it('should return the correct provider when provider is ProviderOptions', async () => {
     const providerOptions = {
-      id: 'openai:chat:gpt-3.5-turbo-foobar',
+      id: 'openai:chat:gpt-4o-mini-foobar',
       config: {
         apiKey: 'abc123',
         temperature: 3.1415926,
       },
     };
     const provider = await getGradingProvider('text', providerOptions, DefaultGradingProvider);
-    expect(provider?.id()).toBe('openai:chat:gpt-3.5-turbo-foobar');
+    expect(provider?.id()).toBe('openai:chat:gpt-4o-mini-foobar');
   });
 
   it('should return the default provider when provider is not provided', async () => {
@@ -405,9 +1140,9 @@ describe('getGradingProvider', () => {
 
 describe('getAndCheckProvider', () => {
   it('should return the default provider when provider is not defined', async () => {
-    expect(await getAndCheckProvider('text', undefined, DefaultGradingProvider, 'test check')).toBe(
-      DefaultGradingProvider,
-    );
+    await expect(
+      getAndCheckProvider('text', undefined, DefaultGradingProvider, 'test check'),
+    ).resolves.toBe(DefaultGradingProvider);
   });
 
   it('should return the default provider when provider does not support type', async () => {
@@ -415,9 +1150,9 @@ describe('getAndCheckProvider', () => {
       id: () => 'test-provider',
       callApi: () => Promise.resolve({ output: 'test' }),
     };
-    expect(
-      await getAndCheckProvider('embedding', provider, DefaultEmbeddingProvider, 'test check'),
-    ).toBe(DefaultEmbeddingProvider);
+    await expect(
+      getAndCheckProvider('embedding', provider, DefaultEmbeddingProvider, 'test check'),
+    ).resolves.toBe(DefaultEmbeddingProvider);
   });
 
   it('should return the provider if it implements the required method', async () => {
@@ -434,9 +1169,7 @@ describe('getAndCheckProvider', () => {
     );
     expect(result).toBe(provider);
   });
-});
 
-describe('getGradingProvider', () => {
   it('should return the default provider when no provider is specified', async () => {
     const provider = await getGradingProvider('text', undefined, DefaultGradingProvider);
     expect(provider).toBe(DefaultGradingProvider);
@@ -521,11 +1254,22 @@ describe('matchesAnswerRelevance', () => {
       });
     });
 
-    const result = await matchesAnswerRelevance(input, output, threshold);
-    expect(result.pass).toBeTruthy();
-    expect(result.reason).toBe('Relevance 1.00 is greater than threshold 0.5');
-    expect(mockCallApi).toHaveBeenCalled();
-    expect(mockCallEmbeddingApi).toHaveBeenCalled();
+    await expect(matchesAnswerRelevance(input, output, threshold)).resolves.toEqual({
+      pass: true,
+      reason: 'Relevance 1.00 is greater than threshold 0.5',
+      score: 1,
+      tokensUsed: {
+        total: expect.any(Number),
+        prompt: expect.any(Number),
+        completion: expect.any(Number),
+        cached: expect.any(Number),
+        completionDetails: expect.any(Object),
+      },
+    });
+    expect(mockCallApi).toHaveBeenCalledWith(
+      expect.stringContaining(ANSWER_RELEVANCY_GENERATE.slice(0, 50)),
+    );
+    expect(mockCallEmbeddingApi).toHaveBeenCalledWith('Input text');
 
     mockCallApi.mockRestore();
     mockCallEmbeddingApi.mockRestore();
@@ -557,14 +1301,27 @@ describe('matchesAnswerRelevance', () => {
           tokenUsage: { total: 5, prompt: 2, completion: 3 },
         });
       }
-      return Promise.reject(new Error('Unexpected input ' + text));
+      return Promise.reject(new Error(`Unexpected input ${text}`));
     });
 
-    const result = await matchesAnswerRelevance(input, output, threshold);
-    expect(result.pass).toBeFalsy();
-    expect(result.reason).toBe('Relevance 0.00 is less than threshold 0.5');
-    expect(mockCallApi).toHaveBeenCalled();
-    expect(mockCallEmbeddingApi).toHaveBeenCalled();
+    await expect(matchesAnswerRelevance(input, output, threshold)).resolves.toEqual({
+      pass: false,
+      reason: 'Relevance 0.00 is less than threshold 0.5',
+      score: 0,
+      tokensUsed: {
+        total: expect.any(Number),
+        prompt: expect.any(Number),
+        completion: expect.any(Number),
+        cached: expect.any(Number),
+        completionDetails: expect.any(Object),
+      },
+    });
+    expect(mockCallApi).toHaveBeenCalledWith(
+      expect.stringContaining(ANSWER_RELEVANCY_GENERATE.slice(0, 50)),
+    );
+    expect(mockCallEmbeddingApi).toHaveBeenCalledWith(
+      expect.stringContaining(ANSWER_RELEVANCY_GENERATE.slice(0, 50)),
+    );
 
     mockCallApi.mockRestore();
     mockCallEmbeddingApi.mockRestore();
@@ -601,9 +1358,11 @@ describe('matchesClassification', () => {
       provider: grader,
     };
 
-    const result = await matchesClassification(expected, output, threshold, grading);
-    expect(result.pass).toBeTruthy();
-    expect(result.reason).toBe(`Classification ${expected} has score 0.60 >= ${threshold}`);
+    await expect(matchesClassification(expected, output, threshold, grading)).resolves.toEqual({
+      pass: true,
+      reason: `Classification ${expected} has score 0.60 >= ${threshold}`,
+      score: 0.6,
+    });
   });
 
   it('should fail when the classification score is below the threshold', async () => {
@@ -616,9 +1375,11 @@ describe('matchesClassification', () => {
       provider: grader,
     };
 
-    const result = await matchesClassification(expected, output, threshold, grading);
-    expect(result.pass).toBeFalsy();
-    expect(result.reason).toBe(`Classification ${expected} has score 0.60 < ${threshold}`);
+    await expect(matchesClassification(expected, output, threshold, grading)).resolves.toEqual({
+      pass: false,
+      reason: `Classification ${expected} has score 0.60 < ${threshold}`,
+      score: 0.6,
+    });
   });
 
   it('should pass when the maximum classification score is above the threshold with undefined expected', async () => {
@@ -631,9 +1392,11 @@ describe('matchesClassification', () => {
       provider: grader,
     };
 
-    const result = await matchesClassification(expected, output, threshold, grading);
-    expect(result.pass).toBeTruthy();
-    expect(result.reason).toBe(`Maximum classification score 0.60 >= ${threshold}`);
+    await expect(matchesClassification(expected, output, threshold, grading)).resolves.toEqual({
+      pass: true,
+      reason: `Maximum classification score 0.60 >= ${threshold}`,
+      score: 0.6,
+    });
   });
 
   it('should use the overridden classification grading config', async () => {
@@ -657,10 +1420,12 @@ describe('matchesClassification', () => {
       });
     });
 
-    const result = await matchesClassification(expected, output, threshold, grading);
-    expect(result.pass).toBeTruthy();
-    expect(result.reason).toBe(`Classification ${expected} has score 0.60 >= ${threshold}`);
-    expect(mockCallApi).toHaveBeenCalled();
+    await expect(matchesClassification(expected, output, threshold, grading)).resolves.toEqual({
+      pass: true,
+      reason: `Classification ${expected} has score 0.60 >= ${threshold}`,
+      score: 0.6,
+    });
+    expect(mockCallApi).toHaveBeenCalledWith('Sample output');
 
     mockCallApi.mockRestore();
   });
@@ -680,10 +1445,21 @@ describe('matchesContextRelevance', () => {
       });
     });
 
-    const result = await matchesContextRelevance(input, context, threshold);
-    expect(result.pass).toBeTruthy();
-    expect(result.reason).toBe('Relevance 0.67 is >= 0.5');
-    expect(mockCallApi).toHaveBeenCalled();
+    await expect(matchesContextRelevance(input, context, threshold)).resolves.toEqual({
+      pass: true,
+      reason: 'Relevance 0.67 is >= 0.5',
+      score: expect.closeTo(0.67, 0.01),
+      tokensUsed: {
+        total: expect.any(Number),
+        prompt: expect.any(Number),
+        completion: expect.any(Number),
+        cached: expect.any(Number),
+        completionDetails: expect.any(Object),
+      },
+    });
+    expect(mockCallApi).toHaveBeenCalledWith(
+      expect.stringContaining(CONTEXT_RELEVANCE.slice(0, 100)),
+    );
 
     mockCallApi.mockRestore();
   });
@@ -701,10 +1477,21 @@ describe('matchesContextRelevance', () => {
       });
     });
 
-    const result = await matchesContextRelevance(input, context, threshold);
-    expect(result.pass).toBeFalsy();
-    expect(result.reason).toBe('Relevance 0.67 is < 0.9');
-    expect(mockCallApi).toHaveBeenCalled();
+    await expect(matchesContextRelevance(input, context, threshold)).resolves.toEqual({
+      pass: false,
+      reason: 'Relevance 0.67 is < 0.9',
+      score: expect.closeTo(0.67, 0.01),
+      tokensUsed: {
+        total: expect.any(Number),
+        prompt: expect.any(Number),
+        completion: expect.any(Number),
+        cached: expect.any(Number),
+        completionDetails: expect.any(Object),
+      },
+    });
+    expect(mockCallApi).toHaveBeenCalledWith(
+      expect.stringContaining(CONTEXT_RELEVANCE.slice(0, 100)),
+    );
 
     mockCallApi.mockRestore();
   });
@@ -732,9 +1519,18 @@ describe('matchesContextFaithfulness', () => {
         });
       });
 
-    const result = await matchesContextFaithfulness(query, output, context, threshold);
-    expect(result.pass).toBeTruthy();
-    expect(result.reason).toBe('Faithfulness 0.67 is >= 0.5');
+    await expect(matchesContextFaithfulness(query, output, context, threshold)).resolves.toEqual({
+      pass: true,
+      reason: 'Faithfulness 0.67 is >= 0.5',
+      score: expect.closeTo(0.67, 0.01),
+      tokensUsed: {
+        total: expect.any(Number),
+        prompt: expect.any(Number),
+        completion: expect.any(Number),
+        cached: expect.any(Number),
+        completionDetails: expect.any(Object),
+      },
+    });
     expect(mockCallApi).toHaveBeenCalledTimes(2);
 
     mockCallApi.mockRestore();
@@ -761,9 +1557,18 @@ describe('matchesContextFaithfulness', () => {
         });
       });
 
-    const result = await matchesContextFaithfulness(query, output, context, threshold);
-    expect(result.pass).toBeFalsy();
-    expect(result.reason).toBe('Faithfulness 0.67 is < 0.7');
+    await expect(matchesContextFaithfulness(query, output, context, threshold)).resolves.toEqual({
+      pass: false,
+      reason: 'Faithfulness 0.67 is < 0.7',
+      score: expect.closeTo(0.67, 0.01),
+      tokensUsed: {
+        total: expect.any(Number),
+        prompt: expect.any(Number),
+        completion: expect.any(Number),
+        cached: expect.any(Number),
+        completionDetails: expect.any(Object),
+      },
+    });
     expect(mockCallApi).toHaveBeenCalledTimes(2);
 
     mockCallApi.mockRestore();
@@ -784,10 +1589,19 @@ describe('matchesContextRecall', () => {
       });
     });
 
-    const result = await matchesContextRecall(context, groundTruth, threshold);
-    expect(result.pass).toBeTruthy();
-    expect(result.reason).toBe('Recall 0.67 is >= 0.5');
-    expect(mockCallApi).toHaveBeenCalled();
+    await expect(matchesContextRecall(context, groundTruth, threshold)).resolves.toEqual({
+      pass: true,
+      reason: 'Recall 0.67 is >= 0.5',
+      score: expect.closeTo(0.67, 0.01),
+      tokensUsed: {
+        total: expect.any(Number),
+        prompt: expect.any(Number),
+        completion: expect.any(Number),
+        cached: expect.any(Number),
+        completionDetails: expect.any(Object),
+      },
+    });
+    expect(mockCallApi).toHaveBeenCalledWith(expect.stringContaining(CONTEXT_RECALL.slice(0, 100)));
 
     mockCallApi.mockRestore();
   });
@@ -805,11 +1619,103 @@ describe('matchesContextRecall', () => {
       });
     });
 
-    const result = await matchesContextRecall(context, groundTruth, threshold);
-    expect(result.pass).toBeFalsy();
-    expect(result.reason).toBe('Recall 0.67 is < 0.9');
-    expect(mockCallApi).toHaveBeenCalled();
+    await expect(matchesContextRecall(context, groundTruth, threshold)).resolves.toEqual({
+      pass: false,
+      reason: 'Recall 0.67 is < 0.9',
+      score: expect.closeTo(0.67, 0.01),
+      tokensUsed: {
+        total: expect.any(Number),
+        prompt: expect.any(Number),
+        completion: expect.any(Number),
+        cached: expect.any(Number),
+        completionDetails: expect.any(Object),
+      },
+    });
+    expect(mockCallApi).toHaveBeenCalledWith(expect.stringContaining(CONTEXT_RECALL.slice(0, 100)));
 
     mockCallApi.mockRestore();
+  });
+});
+
+describe('matchesModeration', () => {
+  const mockModerationResponse = {
+    flags: [],
+    tokenUsage: { total: 5, prompt: 2, completion: 3 },
+  };
+
+  beforeEach(() => {
+    // Clear all environment variables
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.REPLICATE_API_KEY;
+    delete process.env.REPLICATE_API_TOKEN;
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('should skip moderation when assistant response is empty', async () => {
+    const openAiSpy = jest
+      .spyOn(OpenAiModerationProvider.prototype, 'callModerationApi')
+      .mockResolvedValue(mockModerationResponse);
+
+    const result = await matchesModeration({
+      userPrompt: 'test prompt',
+      assistantResponse: '',
+    });
+
+    expect(result).toEqual({
+      pass: true,
+      score: 1,
+      reason: expect.any(String),
+    });
+    expect(openAiSpy).not.toHaveBeenCalled();
+  });
+
+  it('should use OpenAI when OPENAI_API_KEY is present', async () => {
+    process.env.OPENAI_API_KEY = 'test-key';
+    const openAiSpy = jest
+      .spyOn(OpenAiModerationProvider.prototype, 'callModerationApi')
+      .mockResolvedValue(mockModerationResponse);
+
+    await matchesModeration({
+      userPrompt: 'test prompt',
+      assistantResponse: 'test response',
+    });
+
+    expect(openAiSpy).toHaveBeenCalledWith('test prompt', 'test response');
+  });
+
+  it('should fallback to Replicate when only REPLICATE_API_KEY is present', async () => {
+    process.env.REPLICATE_API_KEY = 'test-key';
+    const replicateSpy = jest
+      .spyOn(ReplicateModerationProvider.prototype, 'callModerationApi')
+      .mockResolvedValue(mockModerationResponse);
+
+    await matchesModeration({
+      userPrompt: 'test prompt',
+      assistantResponse: 'test response',
+    });
+
+    expect(replicateSpy).toHaveBeenCalledWith('test prompt', 'test response');
+  });
+
+  it('should respect provider override in grading config', async () => {
+    process.env.OPENAI_API_KEY = 'test-key';
+    const replicateSpy = jest
+      .spyOn(ReplicateModerationProvider.prototype, 'callModerationApi')
+      .mockResolvedValue(mockModerationResponse);
+
+    await matchesModeration(
+      {
+        userPrompt: 'test prompt',
+        assistantResponse: 'test response',
+      },
+      {
+        provider: LLAMA_GUARD_REPLICATE_PROVIDER,
+      },
+    );
+
+    expect(replicateSpy).toHaveBeenCalledWith('test prompt', 'test response');
   });
 });
