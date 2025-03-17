@@ -46,7 +46,7 @@ jobs:
       - run: 
           name: kubectl apply
           command: |
-            CMD='/home/ubuntu/cluster/deploy.sh <<parameters.path>> <<parameters.docker-tag>>'${CIRCLE_SHA1}' <<parameters.deploy-name>> <<parameters.deploy-namespace>>'
+            CMD='/home/ubuntu/cluster/deploy-sta.sh <<parameters.path>> <<parameters.docker-tag>>'${CIRCLE_SHA1}' <<parameters.deploy-name>> <<parameters.deploy-namespace>>'
             echo $CMD
             ssh ${USER_NAME}@${HOST_NAME} ${CMD}
 workflows:
@@ -66,7 +66,7 @@ workflows:
             branches:
               only: 
                 - main
-                - prd
+                # - prd
       - deploy:
           name: promptfoo-deploy
           docker-tag: ""
@@ -82,17 +82,17 @@ workflows:
           requires:
             - promptfoo-build
 
-      - deploy:
-          name: prd-promptfoo-deploy
-          docker-tag: ""
-          path: "/home/ubuntu/coss-cluster-config/circleo/team-gpt/team-gpt-deploy.yaml"
-          deploy-name: promptfoo
-          deploy-namespace: web-app
-          context:
-            - ecr-new
-          filters:
-            branches:
-              only:
-                - prd
-          requires:
-            - promptfoo-build
+      # - deploy:
+      #     name: prd-promptfoo-deploy
+      #     docker-tag: ""
+      #     path: "/home/ubuntu/coss-cluster-config/circleo/team-gpt/team-gpt-deploy.yaml"
+      #     deploy-name: promptfoo
+      #     deploy-namespace: web-app
+      #     context:
+      #       - ecr-new
+      #     filters:
+      #       branches:
+      #         only:
+      #           - prd
+      #     requires:
+      #       - promptfoo-build
