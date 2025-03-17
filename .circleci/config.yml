@@ -68,10 +68,10 @@ workflows:
                 - main
                 # - prd
       - deploy:
-          name: felo-search-promptfoo
+          name: felo-search-promptfoo-deploy
           docker-tag: ""
           path: "/home/ubuntu/cluster/web-app/promptfoo/deploy.yaml"
-          deploy-name: promptfoo
+          deploy-name: felo-search-promptfoo
           deploy-namespace: web-app
           context:
             - ecr-new
