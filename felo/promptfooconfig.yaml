@@ -1,0 +1,16 @@
+# This configuration compares LLM output of 2 prompts x 2 GPT models across 3 test cases.
+# Learn more: https://promptfoo.dev/docs/configuration/guide
+description: '复杂问题评测'
+env:
+  OPENAI_API_KEY: sk-kmBgabwBzdsBJEnX9187CcEf17C844B1964cF0D021085317-1
+  OPENAI_API_HOST: https://one.felo.me/v1
+prompts: ['{{ query }}']
+providers: ['python:retrieve.py']
+tests:
+  - vars:
+      query: 福建晋江灵水中学一初中女生遭霸凌跳楼去世是什么时候？
+    assert:
+      - type: llm-rubric
+        value: 是在2024/3/24
+  
+        
