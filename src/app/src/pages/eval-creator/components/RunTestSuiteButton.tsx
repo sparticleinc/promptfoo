@@ -31,9 +31,7 @@ const RunTestSuiteButton: React.FC = () => {
       prompts,
       providers,
       scenarios,
-      tests: testCases,
-      defaultTest,
-      evaluateOptions
+      tests: testCases
     };
 
     try {
